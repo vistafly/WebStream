@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>WebStreamer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+<style>
+  html, body, #root { margin: 0; padding: 0; height: 100%; background: #0a0b0d; font-family: "Inter Tight", system-ui, sans-serif; color: #eef0f2; }
+  * { box-sizing: border-box; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="lib/store.js"></script>
+<script src="lib/streamed.js"></script>
+<script src="lib/stats.js"></script>
+<script src="lib/notifications.js"></script>
+<script type="text/babel" src="ios-frame.jsx"></script>
+<script type="text/babel" src="tokens.jsx"></script>
+<script type="text/babel" src="data.jsx"></script>
+<script type="text/babel" src="chrome.jsx"></script>
+<script type="text/babel" src="screens-home.jsx"></script>
+<script type="text/babel" src="screens-detail.jsx"></script>
+<script type="text/babel" src="screens-other.jsx"></script>
+<script type="text/babel" src="screens-mobile.jsx"></script>
+
+<script type="text/babel">
+function useViewport() {
+  const [w, setW] = React.useState(typeof window !== 'undefined' ? window.innerWidth : 1440);
+  React.useEffect(() => {
+    const onR = () => setW(window.innerWidth);
+    window.addEventListener('resize', onR);
+    return () => window.removeEventListener('resize', onR);
+  }, []);
+  return w;
+}
+
+function App() {
+  const [route, setRoute] = React.useState({ name: 'home', payload: null });
+  const [, bump] = React.useReducer(x => x + 1, 0);
+  const [streams, setStreams] = React.useState([]);
+  const [streamsLoading, setStreamsLoading] = React.useState(false);
+  const [apiError, setApiError] = React.useState(null);
+  const w = useViewport();
+  const isMobile = w < 768;
+
+  // Expose navigation globally so MatchCard / SideNav / TopNav etc. can call it.
+  React.useEffect(() => {
+    window.WS_GO = (name, payload = null) => {
+      setRoute({ name, payload });
+      window.scrollTo(0, 0);
+    };
+    return () => { delete window.WS_GO; };
+  }, []);
+
+  // Hash routing for refresh / deep-link.
+  React.useEffect(() => {
+    const apply = () => {
+      const h = (window.location.hash || '#home').replace(/^#/, '');
+      const valid = ['home', 'detail', 'player', 'schedule', 'search', 'watchlist', 'settings'];
+      if (valid.includes(h)) setRoute(r => (r.name === h ? r : { name: h, payload: r.payload }));
+    };
+    apply();
+    window.addEventListener('hashchange', apply);
+    return () => window.removeEventListener('hashchange', apply);
+  }, []);
+  React.useEffect(() => {
+    if (window.location.hash.replace(/^#/, '') !== route.name) {
+      window.history.replaceState(null, '', '#' + route.name);
+    }
+  }, [route.name, route.payload && route.payload.id]);
+
+  // Initial data load: live + today's upcoming + sport list, merged. Falls back to mock if API/CORS fails.
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [live, today, sports] = await Promise.all([
+          window.STREAMED.matches({ filter: 'live' }),
+          window.STREAMED.matches({ filter: 'all-today' }).catch(() => []),
+          window.STREAMED.sports().catch(() => null),
+        ]);
+        if (cancelled) return;
+        // Merge: live first (live=true), then today's not-already-live entries.
+        const liveIds = new Set(live.map(m => m.id));
+        const merged = live.concat((today || []).filter(m => !liveIds.has(m.id)));
+        window.MATCHES.length = 0;
+        merged.forEach(m => window.MATCHES.push(m));
+        if (sports && sports.length) {
+          window.SPORTS.length = 0;
+          sports.forEach(s => window.SPORTS.push(s));
+        }
+        // Reset any stale persisted sport filter that no longer exists in
+        // the current sport list (e.g. an older 'mma' or 'soccer' value).
+        const currentFilter = window.WSStore && window.WSStore.get().sportFilter;
+        if (currentFilter && currentFilter !== 'all' && !window.SPORTS.some(s => s.id === currentFilter)) {
+          window.WSStore.setSport('all');
+        }
+        setApiError(null);
+        bump();
+      } catch (e) {
+        console.warn('[WebStreamer] streamed.pk fetch failed — keeping mock data:', e);
+        setApiError(e.message || String(e));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Periodic refresh every 60 seconds for live matches.
+  React.useEffect(() => {
+    const id = setInterval(async () => {
+      try {
+        const live = await window.STREAMED.matches({ filter: 'live' });
+        const liveIds = new Set(live.map(m => m.id));
+        const existing = window.MATCHES.filter(m => !m.live);
+        const merged = live.concat(existing.filter(m => !liveIds.has(m.id)));
+        window.MATCHES.length = 0;
+        merged.forEach(m => window.MATCHES.push(m));
+        bump();
+      } catch (e) {}
+    }, 60000);
+    return () => clearInterval(id);
+  }, []);
+
+  // When entering the player, fetch real streams for the selected match.
+  // If rawSources is empty (Streamed often attaches sources between fetches),
+  // try refetching the match's live data once before giving up — the source
+  // list might have been populated since the home page snapshot.
+  React.useEffect(() => {
+    if (route.name !== 'player') return;
+    const m = route.payload;
+    if (!m) { setStreams([]); return; }
+    let cancelled = false;
+    setStreamsLoading(true);
+    setStreams([]);
+    (async () => {
+      let target = m;
+      // Refetch from live if our cached match has no sources.
+      if (!target.rawSources || target.rawSources.length === 0) {
+        try {
+          const fresh = await window.STREAMED.matches({ filter: 'live' });
+          if (cancelled) return;
+          const refreshed = fresh.find(x => x.id === m.id);
+          if (refreshed && refreshed.rawSources && refreshed.rawSources.length > 0) {
+            target = refreshed;
+          }
+        } catch (e) { /* ignore — fall through to allStreams which will return [] */ }
+      }
+      try {
+        const arr = await window.STREAMED.allStreams(target);
+        if (cancelled) return;
+        setStreams(arr);
+        setStreamsLoading(false);
+      } catch (e) {
+        console.warn('[WebStreamer] stream fetch failed:', e);
+        if (!cancelled) { setStreams([]); setStreamsLoading(false); }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [route.name, route.payload && route.payload.id]);
+
+  if (isMobile) {
+    let inner;
+    switch (route.name) {
+      case 'detail': inner = <MobileMatchDetail match={route.payload}/>; break;
+      case 'player': inner = <MobilePlayer match={route.payload} streams={streams} streamsLoading={streamsLoading}/>; break;
+      default:       inner = <MobileHome/>;
+    }
+    return (
+      <div style={{ width: '100vw', height: '100vh', overflow: 'hidden', background: '#0a0b0d' }}>
+        {inner}
+        {apiError && <ApiBanner msg={apiError}/>}
+      </div>
+    );
+  }
+
+  let screen;
+  switch (route.name) {
+    case 'detail':    screen = <MatchDetail match={route.payload}/>; break;
+    case 'player':    screen = <PlayerFull match={route.payload} streams={streams} streamsLoading={streamsLoading}/>; break;
+    case 'schedule':  screen = <ScheduleScreen/>; break;
+    case 'search':    screen = <SearchScreen/>; break;
+    case 'watchlist': screen = <WatchlistScreen/>; break;
+    case 'settings':  screen = <SettingsScreen/>; break;
+    case 'home':
+    default:          screen = <HomeGrid/>;
+  }
+  return (
+    <div style={{ width: '100vw', height: '100vh', background: '#0a0b0d', position: 'relative' }}>
+      {screen}
+      {route.name === 'player' && streamsLoading && <StreamLoadingBanner/>}
+      {apiError && <ApiBanner msg={apiError}/>}
+    </div>
+  );
+}
+
+function StreamLoadingBanner() {
+  return (
+    <div style={{
+      position: 'fixed', top: 70, left: '50%', transform: 'translateX(-50%)',
+      padding: '8px 16px', background: 'rgba(0,0,0,0.85)', borderRadius: 6,
+      fontFamily: '"JetBrains Mono"', fontSize: 11, color: '#eef0f2',
+      letterSpacing: '0.08em', zIndex: 100, border: '1px solid rgba(255,255,255,0.12)',
+    }}>● Loading streams…</div>
+  );
+}
+
+function ApiBanner({ msg }) {
+  return (
+    <div style={{
+      position: 'fixed', bottom: 16, left: 16, maxWidth: 360, padding: '10px 14px',
+      background: 'rgba(40,20,15,0.95)', border: '1px solid rgba(255,180,140,0.3)',
+      borderRadius: 6, fontFamily: '"JetBrains Mono"', fontSize: 11,
+      color: '#ffd0b8', zIndex: 100, lineHeight: 1.5,
+    }}>
+      <b>API offline</b> — using mock data.<br/>{msg}<br/>
+      <span style={{ opacity: 0.7 }}>Likely CORS or network. Serve via http(s)://, not file://.</span>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
