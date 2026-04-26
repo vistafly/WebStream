@@ -272,6 +272,7 @@
 <script src="lib/streamed.js"></script>
 <script src="lib/stats.js"></script>
 <script src="lib/notifications.js"></script>
+<script src="lib/pin.js"></script>
 <script type="text/babel" src="ios-frame.jsx"></script>
 <script type="text/babel" src="tokens.jsx"></script>
 <script type="text/babel" src="data.jsx"></script>
@@ -556,7 +557,158 @@ function ApiBanner({ msg }) {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+function PinGate({ children }) {
+  const [unlocked, setUnlocked] = React.useState(() => window.WSPin && window.WSPin.isUnlocked());
+  const [pin, setPin] = React.useState('');
+  const [remember, setRemember] = React.useState(true);
+  const [error, setError] = React.useState(null);
+  const [waitMs, setWaitMs] = React.useState(0);
+  const [busy, setBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!waitMs) return;
+    const id = setInterval(() => {
+      const left = window.WSPin.lockoutRemainingMs();
+      setWaitMs(left);
+      if (left <= 0) { setError(null); clearInterval(id); }
+    }, 1000);
+    return () => clearInterval(id);
+  }, [waitMs]);
+
+  if (unlocked) return children;
+
+  async function submit(e) {
+    if (e && e.preventDefault) e.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await window.WSPin.verify(pin, remember);
+      if (r.ok) { setUnlocked(true); return; }
+      if (r.reason === 'locked') {
+        setWaitMs(r.waitMs);
+        setError(`Too many attempts. Try again in ${Math.ceil(r.waitMs / 1000)}s.`);
+      } else if (r.reason === 'wrong') {
+        if (r.waitMs > 0) {
+          setWaitMs(r.waitMs);
+          setError(`Locked for ${Math.ceil(r.waitMs / 1000)}s after too many attempts.`);
+        } else {
+          setError('Wrong PIN.');
+        }
+        setPin('');
+      } else {
+        setError('Could not verify.');
+      }
+    } finally { setBusy(false); }
+  }
+
+  const locked = waitMs > 0;
+  const canSubmit = !busy && !locked && pin.length > 0;
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 10000,
+      background: 'radial-gradient(120% 80% at 50% 30%, #11141a 0%, #07080a 60%, #050608 100%)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      padding: 24, fontFamily: '"Inter Tight", system-ui',
+      color: '#eef0f2',
+    }}>
+      <form onSubmit={submit} style={{
+        width: 'min(380px, 100%)',
+        background: 'rgba(20,22,26,0.85)',
+        border: '1px solid rgba(255,255,255,0.1)',
+        borderRadius: 14, padding: 24,
+        backdropFilter: 'blur(18px) saturate(160%)',
+        boxShadow: '0 16px 48px rgba(0,0,0,0.5)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18 }}>
+          <div style={{
+            width: 32, height: 32, borderRadius: 8,
+            background: 'linear-gradient(135deg, oklch(0.78 0.19 155), oklch(0.55 0.14 165))',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <rect x="3" y="6" width="8" height="6" rx="1" stroke="#0a1208" strokeWidth="1.6"/>
+              <path d="M5 6V4.5a2 2 0 0 1 4 0V6" stroke="#0a1208" strokeWidth="1.6" fill="none"/>
+            </svg>
+          </div>
+          <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: '-0.01em' }}>Enter PIN</div>
+        </div>
+
+        <div style={{
+          fontFamily: '"JetBrains Mono", monospace', fontSize: 11,
+          color: 'rgba(238,240,242,0.55)', lineHeight: 1.5, marginBottom: 16,
+        }}>
+          This site is private. Enter the PIN to continue. Locked for 5 minutes after 5 wrong attempts.
+        </div>
+
+        <input
+          type="password"
+          autoFocus
+          inputMode="numeric"
+          value={pin}
+          onChange={e => setPin(e.target.value)}
+          disabled={locked || busy}
+          placeholder="PIN"
+          style={inputStyle}
+        />
+
+        <label style={{
+          display: 'flex', alignItems: 'center', gap: 8, marginTop: 12,
+          fontFamily: '"JetBrains Mono", monospace', fontSize: 11,
+          color: 'rgba(238,240,242,0.7)', cursor: 'pointer', userSelect: 'none',
+        }}>
+          <input
+            type="checkbox"
+            checked={remember}
+            onChange={e => setRemember(e.target.checked)}
+            style={{ accentColor: 'oklch(0.78 0.19 155)' }}
+          />
+          Remember on this device for 12 hours
+        </label>
+
+        {error && (
+          <div style={{
+            marginTop: 14, padding: '8px 12px', borderRadius: 6,
+            background: 'rgba(255,140,100,0.08)',
+            border: '1px solid rgba(255,140,100,0.4)',
+            fontFamily: '"JetBrains Mono", monospace', fontSize: 11,
+            color: '#ffb499',
+          }}>{error}</div>
+        )}
+
+        <button
+          type="submit"
+          disabled={!canSubmit}
+          style={{
+            width: '100%', height: 40, marginTop: 16,
+            borderRadius: 8, border: 'none',
+            background: canSubmit ? 'oklch(0.78 0.19 155)' : 'rgba(255,255,255,0.08)',
+            color: canSubmit ? '#0a1208' : 'rgba(255,255,255,0.4)',
+            fontFamily: '"Inter Tight", system-ui',
+            fontWeight: 600, fontSize: 14,
+            cursor: canSubmit ? 'pointer' : 'not-allowed',
+            transition: 'background .15s',
+          }}>
+          {locked ? `Locked · ${Math.ceil(waitMs / 1000)}s` : 'Unlock'}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+const inputStyle = {
+  width: '100%', height: 42, padding: '0 14px',
+  background: 'rgba(255,255,255,0.04)',
+  border: '1px solid rgba(255,255,255,0.12)',
+  borderRadius: 8,
+  fontFamily: '"JetBrains Mono", monospace', fontSize: 16,
+  letterSpacing: '0.18em',
+  color: '#eef0f2',
+  outline: 'none',
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<PinGate><App/></PinGate>);
 </script>
 </body>
 </html>
