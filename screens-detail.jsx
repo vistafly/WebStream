@@ -24,6 +24,7 @@ function NotLiveNotice({ m }) {
     typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'
   );
 
+  const [tooLate, setTooLate] = React.useState(null); // { minutesUntilStart, leadMinutes, options }
   async function handleNotify() {
     if (!canSchedule) return;
     if (notifyOn) { store.removeNotification(m.id); return; }
@@ -34,7 +35,21 @@ function NotLiveNotice({ m }) {
     }
     if (perm !== 'granted') return;
     if (!store.get().settings.notifyEnabled) store.setSetting('notifyEnabled', true);
-    store.addNotification(m, lead);
+    const res = store.addNotification(m, lead);
+    if (res && res.ok === false && res.reason === 'too-late') {
+      setTooLate({
+        minutesUntilStart: res.minutesUntilStart,
+        leadMinutes: res.leadMinutes,
+        options: window.pickValidLeads(res.minutesUntilStart, 4),
+      });
+    } else if (res && res.ok) {
+      setTooLate(null);
+    }
+  }
+  function applyOption(min) {
+    // Per-match override only — leave the user's default lead in Settings alone.
+    const r = store.addNotification(m, min);
+    if (r && r.ok) setTooLate(null);
   }
 
   return (
@@ -74,10 +89,7 @@ function NotLiveNotice({ m }) {
             style={pillBtn(false)}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>{Icons.home} Back to home</span>
           </button>
-          {/* Only offer Star for scheduled (future) matches — for a LIVE match
-              with no stream, watchlist is pointless (the game is over by the
-              time you'd come back). */}
-          {m && m.id && isScheduled && (
+          {m && m.id && (
             <button onClick={() => store.toggleWatch(m.id)}
               style={pillBtn(watched)}>
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
@@ -86,11 +98,19 @@ function NotLiveNotice({ m }) {
               </span>
             </button>
           )}
-          {canSchedule && (
+          {m && m.id && (
             <button onClick={handleNotify}
-              disabled={permState === 'denied'}
-              title={permState === 'denied' ? 'Notifications blocked in browser settings' : ''}
-              style={pillBtn(notifyOn)}>
+              disabled={!canSchedule || permState === 'denied'}
+              title={
+                permState === 'denied' ? 'Notifications blocked in browser settings'
+                : !canSchedule ? 'No scheduled start time available'
+                : ''
+              }
+              style={{
+                ...pillBtn(notifyOn),
+                opacity: (!canSchedule || permState === 'denied') ? 0.5 : 1,
+                cursor: (!canSchedule || permState === 'denied') ? 'not-allowed' : 'pointer',
+              }}>
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                 {Icons.bell}
                 {notifyOn
@@ -100,6 +120,39 @@ function NotLiveNotice({ m }) {
             </button>
           )}
         </div>
+        {tooLate && (
+          <div style={{
+            marginTop: 12, padding: '10px 12px', borderRadius: 8,
+            background: 'rgba(255, 180, 100, 0.08)',
+            border: `1px solid ${T.warn}`,
+            fontFamily: T.font, fontSize: 12, color: T.warn,
+            textAlign: 'left',
+            display: 'flex', flexDirection: 'column', gap: 8,
+          }}>
+            <div>
+              Game starts in <strong>{tooLate.minutesUntilStart} min</strong> — sooner than your <strong>{tooLate.leadMinutes}-minute</strong> reminder window.
+              {tooLate.options.length > 0 && ' Pick a shorter window for this match:'}
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {tooLate.options.length === 0 && (
+                <span style={{ color: T.textDim, fontSize: 11 }}>Too close to start for any reminder window.</span>
+              )}
+              {tooLate.options.map(min => (
+                <button key={min} onClick={() => applyOption(min)} style={{
+                  height: 28, padding: '0 12px', borderRadius: 6,
+                  border: `1px solid ${T.warn}`, background: 'rgba(255,180,100,0.15)',
+                  color: T.warn, fontFamily: T.font, fontWeight: 600, fontSize: 12,
+                  cursor: 'pointer',
+                }}>{window.leadLabel(min)}</button>
+              ))}
+              <button onClick={() => setTooLate(null)} style={{
+                height: 28, padding: '0 10px', borderRadius: 6,
+                border: `1px solid ${T.hairlineStrong}`, background: 'transparent',
+                color: T.textDim, fontFamily: T.font, fontSize: 12, cursor: 'pointer',
+              }}>Dismiss</button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -462,13 +515,27 @@ function PlayerFull({ match, streams, streamsLoading }) {
     }, 8000);
     return () => clearTimeout(t);
   }, [activeStream && activeStream.embedUrl]);
+
+  // Tab-toggleable stats overlay (only visible while the player is fullscreened).
+  const { stats, available: statsAvailable } = window.useMatchStats(m);
+  const [statsOpen, setStatsOpen] = React.useState(false);
+  const playerRef = React.useRef(null);
+  const { isFullscreen, request: requestFullscreen, exit: exitFullscreen } = window.useFullscreen(playerRef);
+  const controlsVisible = window.usePlayerActivity(playerRef, 3000);
   return (
     <div style={{ height: '100%', background: T.bg0, display: 'flex', flexDirection: 'column' }}>
       <TopNav/>
       <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 340px', minHeight: 0 }}>
         {/* Left: player */}
         <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, padding: '16px 16px 16px 24px' }}>
-          <div style={{ position: 'relative', borderRadius: 10, overflow: 'hidden', background: '#000', aspectRatio: '16/9', width: 'min(100%, calc((100vh - 200px) * 16 / 9))', alignSelf: 'center' }}>
+          <div ref={playerRef} style={{
+            position: 'relative', borderRadius: isFullscreen ? 0 : 10, overflow: 'hidden',
+            background: '#000',
+            aspectRatio: isFullscreen ? 'auto' : '16/9',
+            width: isFullscreen ? '100%' : 'min(100%, calc((100vh - 200px) * 16 / 9))',
+            height: isFullscreen ? '100%' : 'auto',
+            alignSelf: 'center',
+          }}>
             {/* Iframe stays mounted underneath. The cover sits on top and fades
                 out once the iframe is ready, revealing the live player.
                 For non-live / no-stream matches, the cover stays visible
@@ -478,8 +545,7 @@ function PlayerFull({ match, streams, streamsLoading }) {
                 key={activeStream.embedUrl + ':' + iframeKey}
                 src={activeStream.embedUrl}
                 onLoad={() => setIframeLoaded(true)}
-                allow="autoplay; fullscreen; picture-in-picture"
-                allowFullScreen
+                allow="autoplay; picture-in-picture"
                 referrerPolicy="no-referrer"
                 style={{
                   position: 'absolute', inset: 0, width: '100%', height: '100%',
@@ -507,8 +573,15 @@ function PlayerFull({ match, streams, streamsLoading }) {
                 </div>
               );
             })()}
-            {!streamsLoading && !activeStream && (
-              <NotLiveNotice m={m}/>
+            {m && !m.live && <NotLiveNotice m={m}/>}
+
+            <window.FullscreenClickTrap isFullscreen={isFullscreen} onRequest={requestFullscreen} onExit={exitFullscreen}/>
+            <window.FullscreenButton isFullscreen={isFullscreen} onRequest={requestFullscreen} onExit={exitFullscreen} visible={controlsVisible}/>
+            {isFullscreen && (
+              <>
+                <window.StatsToggle available={statsAvailable && (m && m.live)} open={statsOpen} onToggle={() => setStatsOpen(o => !o)}/>
+                <window.StatsOverlay stats={stats} open={statsOpen} onClose={() => setStatsOpen(false)}/>
+              </>
             )}
           </div>
 
@@ -951,4 +1024,4 @@ function WatchlistBtn({ match }) {
   );
 }
 
-Object.assign(window, { MatchDetail, PlayerMinimal, PlayerFull, ghostBtn, WatchlistBtn });
+Object.assign(window, { MatchDetail, PlayerMinimal, PlayerFull, NotLiveNotice, ghostBtn, WatchlistBtn });

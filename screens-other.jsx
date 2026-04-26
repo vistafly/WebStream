@@ -1,23 +1,81 @@
 // Schedule, Search, Settings, Watchlist, Mobile
 
+function ViewToggle({ value, onChange }) {
+  const cell = (id, icon) => {
+    const active = value === id;
+    return (
+      <button key={id} onClick={() => onChange(id)} title={id === 'list' ? 'List view' : 'Grid view'}
+        style={{
+          width: 32, height: 30, borderRadius: 6, border: 'none',
+          background: active ? T.bg2 : 'transparent',
+          color: active ? T.text : T.textDim,
+          cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          transition: 'background .12s, color .12s',
+        }}
+        onMouseEnter={e => { if (!active) e.currentTarget.style.color = T.text; }}
+        onMouseLeave={e => { if (!active) e.currentTarget.style.color = T.textDim; }}>
+        {icon}
+      </button>
+    );
+  };
+  const listIcon = (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M2 3.5h10M2 7h10M2 10.5h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
+    </svg>
+  );
+  const gridIcon = (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <rect x="2" y="2" width="4" height="4" rx="0.8" stroke="currentColor" strokeWidth="1.4"/>
+      <rect x="8" y="2" width="4" height="4" rx="0.8" stroke="currentColor" strokeWidth="1.4"/>
+      <rect x="2" y="8" width="4" height="4" rx="0.8" stroke="currentColor" strokeWidth="1.4"/>
+      <rect x="8" y="8" width="4" height="4" rx="0.8" stroke="currentColor" strokeWidth="1.4"/>
+    </svg>
+  );
+  return (
+    <div style={{
+      display: 'inline-flex', padding: 3, gap: 2, borderRadius: 8,
+      background: T.bg1, border: `1px solid ${T.hairline}`,
+      flexShrink: 0,
+    }}>
+      {cell('list', listIcon)}
+      {cell('grid', gridIcon)}
+    </div>
+  );
+}
+
 function ScheduleScreen() {
   const store = window.useWSStore();
   const sportFilter = store.get().sportFilter;
-  const [items, setItems] = React.useState(null); // null = loading, [] = empty
+  const [items, setItems] = React.useState(null);
   const [error, setError] = React.useState(null);
+  const [selectedDate, setSelectedDate] = React.useState(window.dateKey(new Date()));
+  const [viewMode, setViewMode] = React.useState('list'); // 'list' | 'grid'
 
   React.useEffect(() => {
     let cancelled = false;
     setItems(null); setError(null);
-    window.STREAMED.matches({ filter: 'all-today' })
+    window.STREAMED.matches({ filter: 'all' })
       .then(arr => { if (!cancelled) setItems(arr); })
       .catch(e => { if (!cancelled) { setItems([]); setError(e.message || String(e)); } });
     return () => { cancelled = true; };
   }, []);
 
   const tz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { return 'Local'; } })();
-  const filtered = (items || []).filter(m => sportFilter === 'all' || (m.sport || '').toLowerCase() === sportFilter)
+  // Filter to selected day (matches with a real timestamp), then by sport.
+  const dayItems = (items || []).filter(m => {
+    const ts = m && m.raw && typeof m.raw.date === 'number' ? m.raw.date : 0;
+    return ts > 0 && window.dateKey(new Date(ts)) === selectedDate;
+  });
+  const filtered = dayItems
+    .filter(m => sportFilter === 'all' || (m.sport || '').toLowerCase() === sportFilter)
     .slice().sort((a, b) => (a.raw && a.raw.date || 0) - (b.raw && b.raw.date || 0));
+
+  const selectedLabel = (() => {
+    const [y, m, d] = selectedDate.split('-').map(n => parseInt(n, 10));
+    const dt = new Date(y, m - 1, d);
+    const isToday = window.dateKey(new Date()) === selectedDate;
+    return (isToday ? 'Today · ' : '') + dt.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+  })();
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: T.bg0 }}>
@@ -27,70 +85,101 @@ function ScheduleScreen() {
         <div className="ws-scroll" style={{ flex: 1, overflowY: 'auto', padding: '24px 28px 40px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 18 }}>
             <h1 style={{ fontFamily: T.font, fontSize: 28, fontWeight: 700, color: T.text, letterSpacing: '-0.02em', margin: 0 }}>Schedule</h1>
-            <span style={{ fontFamily: T.mono, fontSize: 11, color: T.textFaint }}>Today · {tz}</span>
+            <span style={{ fontFamily: T.mono, fontSize: 11, color: T.textFaint }}>{tz}</span>
           </div>
 
-          {/* Sport filter pills — only show sports that have today's events */}
-          {(() => {
-            const counts = {};
-            (items || []).forEach(m => { counts[m.sport] = (counts[m.sport] || 0) + 1; });
-            const visible = SPORTS.filter(s => s.id === 'all' || counts[s.id] > 0);
-            return (
-              <div style={{ display: 'flex', gap: 6, marginBottom: 24, flexWrap: 'wrap' }}>
-                {visible.map((s) => (
-                  <Pill key={s.id} active={s.id === sportFilter} onClick={() => store.setSport(s.id)}>{s.label}</Pill>
-                ))}
-              </div>
-            );
-          })()}
+          <div style={{ display: 'grid', gridTemplateColumns: '380px 1fr', gap: 24, alignItems: 'start' }}>
+            <MatchCalendar matches={items || []} selected={selectedDate} onSelect={setSelectedDate}/>
 
-          {items === null && <div style={{ fontFamily: T.mono, fontSize: 12, color: T.textDim, padding: '40px 0' }}>Loading today's matches…</div>}
-          {items && items.length === 0 && (
-            <div style={{ fontFamily: T.mono, fontSize: 12, color: T.textDim, padding: '40px 0' }}>
-              No matches today.{error ? ' (' + error + ')' : ''}
-            </div>
-          )}
-          {filtered.length > 0 && (
             <div>
-              {filtered.map((e) => (
-                <div key={e.id}
-                  onClick={() => window.WS_GO && window.WS_GO('player', e)}
-                  style={{
-                    display: 'grid', gridTemplateColumns: '90px 70px 1fr 130px 100px 80px',
-                    gap: 16, alignItems: 'center', padding: '14px 12px',
-                    borderBottom: `1px solid ${T.hairline}`,
-                    background: e.live ? `linear-gradient(90deg, ${T.liveDim} 0%, transparent 8%)` : 'transparent',
-                    cursor: 'pointer',
-                  }}>
-                  <div style={{ fontFamily: T.mono, fontSize: 14, fontWeight: 600, color: e.live ? T.live : T.text }}>
-                    {e.live ? 'NOW' : e.clock}
-                  </div>
-                  <div>
-                    {e.live ? <LiveDot/> : <span style={{ fontFamily: T.mono, fontSize: 10, color: T.textFaint, letterSpacing: '0.12em' }}>UPCOMING</span>}
-                  </div>
-                  <div>
-                    <div style={{ fontFamily: T.mono, fontSize: 9, letterSpacing: '0.12em', color: T.textFaint, textTransform: 'uppercase', marginBottom: 4 }}>{e.league}</div>
-                    <div style={{ fontFamily: T.font, fontSize: 14, fontWeight: 600, color: T.text }}>
-                      {e.a}{e.b && <span style={{ color: T.textFaint, fontWeight: 400 }}> vs </span>}{e.b}
-                    </div>
-                  </div>
-                  <div style={{ fontFamily: T.font, fontSize: 12, color: T.textDim, textTransform: 'capitalize' }}>{e.sport}</div>
-                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.textDim }}>
-                    {(e.rawSources || []).length} source{(e.rawSources || []).length === 1 ? '' : 's'}
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6 }} onClick={ev => ev.stopPropagation()}>
-                    <StarToggle id={e.id}/>
-                    {e.live && (e.rawSources || []).length > 0 && <button onClick={() => window.WS_GO && window.WS_GO('player', e)} style={{
-                      height: 28, padding: '0 12px', borderRadius: 6, border: 'none',
-                      background: T.live, color: '#0a1208', fontFamily: T.font,
-                      fontWeight: 600, fontSize: 11, cursor: 'pointer',
-                      display: 'flex', alignItems: 'center', gap: 5,
-                    }}>{Icons.play}</button>}
+              <div style={{
+                display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
+                gap: 12, marginBottom: 14,
+              }}>
+                <div>
+                  <div style={{
+                    fontFamily: T.font, fontSize: 18, fontWeight: 600, color: T.text,
+                    marginBottom: 4,
+                  }}>{selectedLabel}</div>
+                  <div style={{ fontFamily: T.mono, fontSize: 11, color: T.textFaint }}>
+                    {dayItems.length} match{dayItems.length === 1 ? '' : 'es'}
                   </div>
                 </div>
-              ))}
+                <ViewToggle value={viewMode} onChange={setViewMode}/>
+              </div>
+
+              {(() => {
+                const counts = {};
+                dayItems.forEach(mm => { counts[mm.sport] = (counts[mm.sport] || 0) + 1; });
+                const visible = SPORTS.filter(s => s.id === 'all' || counts[s.id] > 0);
+                return (
+                  <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
+                    {visible.map((s) => (
+                      <Pill key={s.id} active={s.id === sportFilter} onClick={() => store.setSport(s.id)}>{s.label}</Pill>
+                    ))}
+                  </div>
+                );
+              })()}
+
+              {items === null && <div style={{ fontFamily: T.mono, fontSize: 12, color: T.textDim, padding: '40px 0' }}>Loading matches…</div>}
+              {items && filtered.length === 0 && (
+                <div style={{ fontFamily: T.mono, fontSize: 12, color: T.textDim, padding: '40px 0' }}>
+                  No matches on this day.{error ? ' (' + error + ')' : ''}
+                </div>
+              )}
+              {filtered.length > 0 && viewMode === 'list' && (
+                <div style={{
+                  display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)',
+                  gap: '0 16px',
+                }}>
+                  {filtered.map((e) => (
+                    <div key={e.id}
+                      onClick={() => window.WS_GO && window.WS_GO('player', e)}
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '60px 1fr auto auto',
+                        gap: 12, alignItems: 'center', padding: '12px 10px',
+                        borderBottom: `1px solid ${T.hairline}`,
+                        background: e.live ? `linear-gradient(90deg, ${T.liveDim} 0%, transparent 12%)` : 'transparent',
+                        cursor: 'pointer', minWidth: 0,
+                      }}>
+                      <div style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 600, color: e.live ? T.live : T.text }}>
+                        {e.live ? 'NOW' : e.clock}
+                      </div>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontFamily: T.mono, fontSize: 9, letterSpacing: '0.12em', color: T.textFaint, textTransform: 'uppercase', marginBottom: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.league}</div>
+                        <div style={{ fontFamily: T.font, fontSize: 13, fontWeight: 600, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {e.a}{e.b && <span style={{ color: T.textFaint, fontWeight: 400 }}> vs </span>}{e.b}
+                        </div>
+                      </div>
+                      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.textDim, whiteSpace: 'nowrap' }}>
+                        {(e.rawSources || []).length}{' '}src
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 4, alignItems: 'center' }} onClick={ev => ev.stopPropagation()}>
+                        <StarToggle id={e.id}/>
+                        {!e.live && <NotifyToggle m={e} inline/>}
+                        {e.live && (e.rawSources || []).length > 0 && <button onClick={() => window.WS_GO && window.WS_GO('player', e)} style={{
+                          height: 26, padding: '0 8px', borderRadius: 6, border: 'none',
+                          background: T.live, color: '#0a1208', fontFamily: T.font,
+                          fontWeight: 600, fontSize: 10, cursor: 'pointer',
+                          display: 'flex', alignItems: 'center', gap: 4,
+                        }}>{Icons.play}</button>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {filtered.length > 0 && viewMode === 'grid' && (
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
+                  gap: 12,
+                }}>
+                  {filtered.map(m => <MatchCard key={m.id} m={m}/>)}
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
       </div>
     </div>
@@ -187,8 +276,6 @@ function SearchScreen() {
 function WatchlistScreen() {
   const store = window.useWSStore();
   const ids = store.get().watchlist;
-  const recently = store.get().recently;
-  // Resolve watchlist ids to current match metadata when available; fall back to a stub.
   const byId = Object.fromEntries(MATCHES.map(m => [m.id, m]));
   const items = ids.map(id => byId[id] || { id, a: 'Match ' + id.slice(0, 6), b: '', league: 'Unavailable', live: false, hue: 200 });
   const liveItems = items.filter(m => m.live);
@@ -227,17 +314,61 @@ function WatchlistScreen() {
               </div>
             </>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RecentScreen() {
+  const store = window.useWSStore();
+  const recently = store.get().recently || [];
+  const byId = Object.fromEntries(MATCHES.map(m => [m.id, m]));
+  const fmtAgo = (ts) => {
+    const ms = Date.now() - (ts || 0);
+    const m = Math.round(ms / 60000);
+    if (m < 1) return 'just now';
+    if (m < 60) return m + 'm ago';
+    const h = Math.round(m / 60);
+    if (h < 24) return h + 'h ago';
+    return Math.round(h / 24) + 'd ago';
+  };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: T.bg0 }}>
+      <TopNav/>
+      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+        <SideNav active="recent"/>
+        <div className="ws-scroll" style={{ flex: 1, overflowY: 'auto', padding: '24px 28px 40px' }}>
+          <div style={{ marginBottom: 24 }}>
+            <h1 style={{ fontFamily: T.font, fontSize: 28, fontWeight: 700, color: T.text, letterSpacing: '-0.02em', margin: 0 }}>Recently watched</h1>
+            <div style={{ fontFamily: T.mono, fontSize: 11, color: T.textFaint, marginTop: 4 }}>{recently.length} item{recently.length === 1 ? '' : 's'}</div>
+          </div>
+
+          {recently.length === 0 && (
+            <div style={{ fontFamily: T.mono, fontSize: 12, color: T.textDim, padding: '40px 0' }}>
+              Nothing watched yet. Streams you open will show up here.
+            </div>
+          )}
 
           {recently.length > 0 && (
-            <>
-              <SectionHeader title="Recently watched"/>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-                {recently.map(r => {
-                  const live = byId[r.id];
-                  return <MatchCard key={r.id} m={live || r}/>;
-                })}
-              </div>
-            </>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+              {recently.map(r => {
+                const live = byId[r.id] || r;
+                return (
+                  <div key={r.id + ':' + r.ts} style={{ position: 'relative' }}>
+                    <MatchCard m={live}/>
+                    <div style={{
+                      position: 'absolute', top: 8, right: 8,
+                      padding: '3px 7px', borderRadius: 4,
+                      background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(6px)',
+                      fontFamily: T.mono, fontSize: 9, color: '#fff',
+                      letterSpacing: '0.06em', textTransform: 'uppercase',
+                      pointerEvents: 'none',
+                    }}>{fmtAgo(r.ts)}</div>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </div>
       </div>
@@ -371,4 +502,4 @@ function Toggle({ checked, onChange }) {
   );
 }
 
-Object.assign(window, { ScheduleScreen, SearchScreen, WatchlistScreen, SettingsScreen });
+Object.assign(window, { ScheduleScreen, SearchScreen, WatchlistScreen, RecentScreen, SettingsScreen });

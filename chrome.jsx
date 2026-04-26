@@ -384,7 +384,7 @@ function SideNav({ active = 'home' }) {
         <div key={it.id}
           onClick={() => {
             if (it.id === 'home') store.setSport('all');
-            window.WS_GO && window.WS_GO(it.id === 'recent' ? 'watchlist' : it.id);
+            window.WS_GO && window.WS_GO(it.id);
           }}
           style={{
           height: 32, padding: '0 10px', display: 'flex', alignItems: 'center',
@@ -443,7 +443,7 @@ function MatchCard({ m, compact, onClick, fill }) {
   // are none. This avoids the dead-end detail screen on every borderline match.
   const handleClick = onClick || (() => window.WS_GO && window.WS_GO('player', m));
   return (
-    <div onClick={handleClick} style={{
+    <div className="ws-card" onClick={handleClick} style={{
       background: T.bg1, border: `1px solid ${T.hairline}`,
       borderRadius: 10, overflow: 'hidden', cursor: 'pointer',
       transition: 'border-color .15s, transform .15s',
@@ -575,14 +575,17 @@ function StarToggle({ id, size = 14 }) {
 // Bell pill rendered on the top-right of non-live MatchCards. Schedules a
 // notification with the user's configured lead time. Disabled with a hint
 // for matches that have no future start timestamp (e.g. 24/7 channels).
-function NotifyToggle({ m }) {
+function NotifyToggle({ m, inline }) {
   const store = window.useWSStore();
   const startMs = m && m.raw && typeof m.raw.date === 'number' ? m.raw.date : 0;
   const canSchedule = startMs > Date.now();
   const on = m && m.id ? store.isNotifyScheduled(m.id) : false;
-  if (!canSchedule && !on) return null;
+  if (!inline && !canSchedule && !on) return null;
+  if (inline && !m) return null;
+  const disabled = inline && !canSchedule && !on;
   async function handle(e) {
     e.stopPropagation();
+    if (disabled) return;
     if (!m || !m.id) return;
     if (on) { store.removeNotification(m.id); return; }
     let perm = typeof Notification !== 'undefined' ? Notification.permission : 'unsupported';
@@ -591,7 +594,41 @@ function NotifyToggle({ m }) {
     }
     if (perm !== 'granted') return;
     if (!store.get().settings.notifyEnabled) store.setSetting('notifyEnabled', true);
-    store.addNotification(m, store.get().settings.notifyLeadMinutes);
+    const res = store.addNotification(m, store.get().settings.notifyLeadMinutes);
+    if (res && res.ok === false && res.reason === 'too-late' && window.WSToast) {
+      const opts = pickValidLeads(res.minutesUntilStart, 4);
+      if (opts.length > 0) {
+        window.WSToast(
+          `Game starts in ${res.minutesUntilStart} min — sooner than your ${res.leadMinutes}-min reminder window. Pick a shorter window for this match:`,
+          {
+            actions: opts.map(min => ({
+              label: leadLabel(min),
+              onAction: () => { store.addNotification(m, min); },
+            })),
+          }
+        );
+      } else {
+        window.WSToast(`Game starts in ${res.minutesUntilStart} min — too soon for any reminder window.`);
+      }
+    }
+  }
+  if (inline) {
+    return (
+      <button onClick={handle} disabled={disabled}
+        title={disabled ? 'No scheduled start time' : (on ? 'Cancel reminder' : 'Notify me before start')}
+        style={{
+          width: 26, height: 26, borderRadius: 5,
+          background: on ? T.liveDim : 'transparent',
+          color: on ? T.live : (disabled ? T.textFaint : T.textDim),
+          border: on ? `1px solid ${T.live}` : `1px solid ${T.hairline}`,
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          opacity: disabled ? 0.5 : 1,
+          flexShrink: 0,
+        }}>
+        {Icons.bell}
+      </button>
+    );
   }
   return (
     <button onClick={handle}
@@ -613,4 +650,476 @@ function NotifyToggle({ m }) {
   );
 }
 
-Object.assign(window, { TopNav, SideNav, MatchCard, iconBtn, StarToggle, NotifyToggle });
+// Lead-time options (minutes before kickoff) for reminders. 0 means
+// "at the start of the game". Ordered smallest → largest for display.
+const NOTIFY_LEAD_OPTS = [0, 5, 10, 15, 30, 60];
+
+function leadLabel(min) {
+  return min === 0 ? 'At start' : `${min}-min`;
+}
+
+// Largest viable lead — iterates the list and keeps the last one that
+// fits within the remaining window (with a 30s safety margin). Returns
+// null if even the smallest option (0 = at start) is past.
+function pickShorterLead(minutesUntilStart) {
+  const safe = minutesUntilStart - 0.5;
+  let best = null;
+  for (const opt of NOTIFY_LEAD_OPTS) {
+    if (opt <= safe) best = opt;
+  }
+  return best;
+}
+
+// All viable lead options, smallest → largest. Useful when offering
+// the user a choice of shorter reminder windows.
+function pickValidLeads(minutesUntilStart, max) {
+  const safe = minutesUntilStart - 0.5;
+  const cap = typeof max === 'number' ? max : 4;
+  const out = [];
+  for (const opt of NOTIFY_LEAD_OPTS) {
+    if (opt <= safe) out.push(opt);
+  }
+  return out.slice(0, cap);
+}
+
+// Hook: tracks whether the given ref (the player container) is currently
+// the document's fullscreen element. We deliberately do NOT redirect
+// iframe-initiated fullscreen here — that requires async re-entry which
+// browsers reject because the user-gesture chain is broken across the
+// exit/enter cycle. Instead, callers should disallow fullscreen on the
+// iframe (drop the `allowFullScreen` attr / `fullscreen` allow directive)
+// and rely on `request()` from a real user gesture (our own button).
+function useFullscreen(ref) {
+  const [isFs, setIsFs] = React.useState(false);
+  React.useEffect(() => {
+    const onChange = () => {
+      const el = document.fullscreenElement || document.webkitFullscreenElement;
+      setIsFs(!!el && !!ref.current && (el === ref.current || ref.current.contains(el)));
+    };
+    document.addEventListener('fullscreenchange', onChange);
+    document.addEventListener('webkitfullscreenchange', onChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onChange);
+      document.removeEventListener('webkitfullscreenchange', onChange);
+    };
+  }, [ref]);
+  const request = React.useCallback(() => {
+    const el = ref.current; if (!el) return;
+    const fn = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (fn) fn.call(el);
+  }, [ref]);
+  const exit = React.useCallback(() => {
+    const fn = document.exitFullscreen || document.webkitExitFullscreen;
+    if (fn) fn.call(document);
+  }, []);
+  return { isFullscreen: isFs, request, exit };
+}
+
+// Hook: resolves an ESPN match for the given Streamed match (best-effort)
+// and polls live stats every 30s. Returns { stats, available }. `available`
+// is false until findMatch succeeds — callers should hide their stats UI
+// entirely while it's false.
+function useMatchStats(m) {
+  const [stats, setStats] = React.useState(null);
+  const [found, setFound] = React.useState(null);
+  React.useEffect(() => {
+    setStats(null); setFound(null);
+    if (!m || !m.id || !window.STATS) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const f = await window.STATS.findMatch(m);
+        if (cancelled || !f) return;
+        setFound(f);
+        const s = await window.STATS.fetchStats(f);
+        if (cancelled) return;
+        setStats(s);
+      } catch (e) { /* best-effort */ }
+    })();
+    return () => { cancelled = true; };
+  }, [m && m.id]);
+  React.useEffect(() => {
+    if (!found || !window.STATS) return;
+    let cancelled = false;
+    const id = setInterval(async () => {
+      try {
+        const s = await window.STATS.fetchStats(found);
+        if (!cancelled && s) setStats(s);
+      } catch (e) {}
+    }, 30000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [found && found.eventId]);
+  return { stats, available: !!found };
+}
+
+// Floating stats overlay rendered inside the player container. Visible only
+// when `open` and stats are resolved. Glass panel docked top-right (desktop)
+// / top-center (mobile) so it doesn't block the play button or controls.
+function StatsOverlay({ stats, open, onClose, compact }) {
+  if (!open || !stats) return null;
+  const sect = (title, children) => (
+    <div style={{ marginTop: 14 }}>
+      <div style={{
+        fontFamily: T.mono, fontSize: 9, letterSpacing: '0.16em',
+        color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase',
+        marginBottom: 8,
+      }}>{title}</div>
+      {children}
+    </div>
+  );
+  const team = (t, side) => (
+    <div style={{
+      display: 'flex', flexDirection: 'column', alignItems: side === 'home' ? 'flex-start' : 'flex-end',
+      flex: 1, minWidth: 0,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexDirection: side === 'home' ? 'row' : 'row-reverse' }}>
+        {t.logo && <img src={t.logo} alt="" style={{ width: 26, height: 26, objectFit: 'contain' }}/>}
+        <div style={{
+          fontFamily: T.font, fontSize: 13, fontWeight: 600, color: '#fff',
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+          maxWidth: 140,
+        }}>{t.shortName || t.name}</div>
+      </div>
+      <div style={{
+        fontFamily: T.mono, fontSize: 26, fontWeight: 700, color: '#fff',
+        marginTop: 4, letterSpacing: '-0.02em',
+      }}>{t.score}</div>
+    </div>
+  );
+  return (
+    <div style={{
+      position: 'absolute',
+      top: compact ? 'calc(env(safe-area-inset-top) + 60px)' : 16,
+      right: compact ? 12 : 16,
+      left: compact ? 12 : 'auto',
+      width: compact ? 'auto' : 360,
+      maxHeight: compact ? 'calc(100% - 120px)' : 'calc(100% - 32px)',
+      background: 'rgba(8,10,14,0.78)',
+      backdropFilter: 'blur(18px) saturate(160%)',
+      WebkitBackdropFilter: 'blur(18px) saturate(160%)',
+      border: '1px solid rgba(255,255,255,0.12)',
+      borderRadius: 14, padding: 16, color: '#fff',
+      zIndex: 12, overflow: 'auto',
+      boxShadow: '0 16px 48px rgba(0,0,0,0.55)',
+      animation: 'ws-stats-in .25s ease-out',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {stats.status === 'live' && <LiveDot/>}
+          <span style={{
+            fontFamily: T.mono, fontSize: 10, letterSpacing: '0.14em',
+            color: 'rgba(255,255,255,0.7)', textTransform: 'uppercase',
+          }}>{stats.period || (stats.status === 'final' ? 'Final' : stats.status === 'pre' ? 'Pre-game' : 'Live')}</span>
+        </div>
+        <button onClick={onClose} title="Close stats" style={{
+          width: 24, height: 24, borderRadius: 6, border: 'none',
+          background: 'rgba(255,255,255,0.08)', color: '#fff', cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/></svg>
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        {team(stats.home, 'home')}
+        <div style={{ fontFamily: T.mono, fontSize: 11, color: 'rgba(255,255,255,0.45)' }}>vs</div>
+        {team(stats.away, 'away')}
+      </div>
+
+      {stats.stats && stats.stats.length > 0 && sect('Box score', (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {stats.stats.map((row, i) => (
+            <div key={i} style={{
+              display: 'grid', gridTemplateColumns: '1fr auto 1fr',
+              gap: 10, alignItems: 'center',
+              fontFamily: T.font, fontSize: 12, color: '#fff',
+            }}>
+              <div style={{ textAlign: 'left', fontFamily: T.mono, fontWeight: 600, color: 'rgba(255,255,255,0.95)' }}>{row.home}</div>
+              <div style={{ fontFamily: T.mono, fontSize: 10, color: 'rgba(255,255,255,0.5)', letterSpacing: '0.1em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{row.label}</div>
+              <div style={{ textAlign: 'right', fontFamily: T.mono, fontWeight: 600, color: 'rgba(255,255,255,0.95)' }}>{row.away}</div>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Hook: returns true while the user has been active inside `ref` within
+// the last `idleMs` ms. Mousemove/touch/click reset the timer. Used to
+// auto-hide custom player controls the way the iframe's own controls do.
+function usePlayerActivity(ref, idleMs) {
+  const ms = typeof idleMs === 'number' ? idleMs : 4000;
+  const [active, setActive] = React.useState(true);
+  React.useEffect(() => {
+    const el = ref && ref.current;
+    if (!el) return;
+    let timer;
+    const bump = () => {
+      setActive(true);
+      clearTimeout(timer);
+      timer = setTimeout(() => setActive(false), ms);
+    };
+    bump();
+    const opts = { passive: true };
+    el.addEventListener('mousemove', bump, opts);
+    el.addEventListener('mousedown', bump, opts);
+    el.addEventListener('touchstart', bump, opts);
+    el.addEventListener('mouseenter', bump, opts);
+    return () => {
+      el.removeEventListener('mousemove', bump);
+      el.removeEventListener('mousedown', bump);
+      el.removeEventListener('touchstart', bump);
+      el.removeEventListener('mouseenter', bump);
+      clearTimeout(timer);
+    };
+  }, [ref, ms]);
+  return active;
+}
+
+// Fullscreen toggle button — fullscreens the player container (not the
+// iframe) so React-rendered overlays (stats etc.) stay layered on top.
+// Switches to an exit icon when already fullscreen, and auto-fades on
+// inactivity (driven by the `visible` prop) to mimic native player UX.
+function FullscreenButton({ isFullscreen, onRequest, onExit, visible = true, compact }) {
+  const handle = isFullscreen ? onExit : onRequest;
+  return (
+    <button onClick={handle} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'} style={{
+      position: 'absolute',
+      bottom: compact ? 'calc(env(safe-area-inset-bottom) + 12px)' : 14,
+      right: compact ? 20 : 24,
+      zIndex: 11,
+      width: 36, height: 36, borderRadius: 8,
+      background: 'rgba(0,0,0,0.6)',
+      backdropFilter: 'blur(8px)',
+      color: '#fff', border: '1px solid rgba(255,255,255,0.18)',
+      cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+      opacity: visible ? 1 : 0,
+      transform: visible ? 'translateY(0)' : 'translateY(6px)',
+      transition: 'opacity .25s ease, transform .25s ease',
+      pointerEvents: visible ? 'auto' : 'none',
+    }}>
+      {isFullscreen ? (
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          {/* exit fullscreen — corner brackets pointing inward */}
+          <path d="M5 2v3H2M9 2v3h3M5 12V9H2M9 12V9h3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      ) : (
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M2 5V2h3M12 5V2H9M2 9v3h3M12 9v3H9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      )}
+    </button>
+  );
+}
+
+// Invisible click-trap covering the bottom-right corner of the player —
+// where streams almost always render their fullscreen / exit-fullscreen
+// button. Clicks in this hotspot are intercepted and routed to our
+// container fullscreen toggle, so reaching for the iframe's own button
+// (entering OR exiting) actually toggles our overlay-friendly fullscreen.
+function FullscreenClickTrap({ isFullscreen, onRequest, onExit, compact }) {
+  const handle = isFullscreen ? onExit : onRequest;
+  return (
+    <div
+      onClick={(e) => { e.stopPropagation(); e.preventDefault(); handle(); }}
+      onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); }}
+      title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+      style={{
+        position: 'absolute',
+        bottom: 0, right: 0,
+        width: compact ? 64 : 72, height: compact ? 56 : 60,
+        zIndex: 10, // above iframe (1) and cover (2), below FullscreenButton (11)
+        cursor: 'pointer',
+        background: 'transparent',
+      }}
+    />
+  );
+}
+
+// Tab-style toggle button to show the stats overlay. Hidden when stats
+// aren't available so it never appears as a dead button. Also hidden once
+// the overlay is open — the overlay has its own close button and the
+// toggle would otherwise sit on top of it.
+function StatsToggle({ available, open, onToggle, compact }) {
+  if (!available || open) return null;
+  return (
+    <button onClick={onToggle} title={open ? 'Hide stats' : 'Show stats'} style={{
+      position: 'absolute',
+      top: compact ? 'calc(env(safe-area-inset-top) + 12px)' : 16,
+      right: compact ? 12 : 16,
+      zIndex: 13,
+      height: 32, padding: '0 12px', borderRadius: 999,
+      background: open ? T.live : 'rgba(0,0,0,0.6)',
+      backdropFilter: 'blur(8px)',
+      color: open ? '#0a1208' : '#fff',
+      border: open ? `1px solid ${T.live}` : '1px solid rgba(255,255,255,0.18)',
+      fontFamily: T.font, fontSize: 12, fontWeight: 600,
+      letterSpacing: '0.04em', cursor: 'pointer',
+      display: 'inline-flex', alignItems: 'center', gap: 6,
+    }}>
+      <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+        <rect x="1.5" y="6" width="2" height="5.5" rx="0.6" fill="currentColor"/>
+        <rect x="5.5" y="3" width="2" height="8.5" rx="0.6" fill="currentColor"/>
+        <rect x="9.5" y="0.5" width="2" height="11" rx="0.6" fill="currentColor"/>
+      </svg>
+      {open ? 'Stats' : 'Stats'}
+    </button>
+  );
+}
+
+// Local-date key (YYYY-MM-DD) for a Date — used to bucket matches by day.
+function dateKey(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
+}
+
+// Calendar grid: month view, 7 cols (Sun..Sat). Days with matches get a
+// small dot indicator. Click a day to call onSelect(YYYY-MM-DD).
+function MatchCalendar({ matches, selected, onSelect, compact }) {
+  const today = new Date();
+  const todayKey = dateKey(today);
+  const initial = (() => {
+    if (selected) {
+      const [y, m] = selected.split('-').map(n => parseInt(n, 10));
+      return new Date(y, m - 1, 1);
+    }
+    return new Date(today.getFullYear(), today.getMonth(), 1);
+  })();
+  const [view, setView] = React.useState(initial);
+
+  // Bucket matches by date key — count per day so we can show 1/2/3 dots.
+  const counts = React.useMemo(() => {
+    const out = {};
+    (matches || []).forEach(m => {
+      const ts = m && m.raw && typeof m.raw.date === 'number' ? m.raw.date : 0;
+      if (!ts) return;
+      const k = dateKey(new Date(ts));
+      out[k] = (out[k] || 0) + 1;
+    });
+    return out;
+  }, [matches]);
+
+  const monthStart = new Date(view.getFullYear(), view.getMonth(), 1);
+  const monthEnd = new Date(view.getFullYear(), view.getMonth() + 1, 0);
+  const startWeekday = monthStart.getDay(); // 0..6, Sun
+  const daysInMonth = monthEnd.getDate();
+  const cells = [];
+  for (let i = 0; i < startWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  const monthLabel = view.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  const cellSize = compact ? 38 : 46;
+  const dotSize = compact ? 3 : 4;
+
+  const arrowBtn = {
+    width: 30, height: 30, borderRadius: 8, border: 'none',
+    background: 'transparent', color: T.textDim, cursor: 'pointer',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    transition: 'background .12s, color .12s',
+  };
+
+  function goToday() {
+    setView(new Date(today.getFullYear(), today.getMonth(), 1));
+    if (onSelect) onSelect(todayKey);
+  }
+
+  return (
+    <div style={{
+      background: T.bg1, border: `1px solid ${T.hairline}`,
+      borderRadius: 14, padding: compact ? 12 : 16,
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        marginBottom: 12,
+      }}>
+        <div style={{
+          fontFamily: T.font, fontSize: compact ? 14 : 16, fontWeight: 600,
+          color: T.text, letterSpacing: '-0.01em',
+        }}>{monthLabel}</div>
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+          <button style={arrowBtn} onClick={() => setView(new Date(view.getFullYear(), view.getMonth() - 1, 1))}
+            onMouseEnter={e => { e.currentTarget.style.background = T.bg2; e.currentTarget.style.color = T.text; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = T.textDim; }}>
+            <svg width="12" height="12" viewBox="0 0 12 12"><path d="M8 2L4 6l4 4" stroke="currentColor" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          </button>
+          <button onClick={goToday} title="Jump to today" style={{
+            height: 28, padding: '0 12px', borderRadius: 999,
+            border: `1px solid ${T.live}`, background: 'transparent',
+            color: T.live, fontFamily: T.font, fontSize: 11, fontWeight: 600,
+            cursor: 'pointer', letterSpacing: '0.04em', textTransform: 'uppercase',
+            transition: 'background .12s',
+          }}
+          onMouseEnter={e => e.currentTarget.style.background = T.liveDim}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+            Today
+          </button>
+          <button style={arrowBtn} onClick={() => setView(new Date(view.getFullYear(), view.getMonth() + 1, 1))}
+            onMouseEnter={e => { e.currentTarget.style.background = T.bg2; e.currentTarget.style.color = T.text; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = T.textDim; }}>
+            <svg width="12" height="12" viewBox="0 0 12 12"><path d="M4 2l4 4-4 4" stroke="currentColor" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2, marginBottom: 6 }}>
+        {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
+          <div key={d} style={{
+            fontFamily: T.mono, fontSize: 9, letterSpacing: '0.14em',
+            color: T.textFaint, textAlign: 'center', textTransform: 'uppercase',
+            padding: '6px 0',
+          }}>{d}</div>
+        ))}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2 }}>
+        {cells.map((d, i) => {
+          if (d === null) return <div key={'e' + i} style={{ height: cellSize }}/>;
+          const cellDate = new Date(view.getFullYear(), view.getMonth(), d);
+          const k = dateKey(cellDate);
+          const count = counts[k] || 0;
+          const isSelected = selected === k;
+          const isToday = k === todayKey;
+          const hasEvents = count > 0;
+          return (
+            <div key={k} onClick={() => onSelect && onSelect(k)} style={{
+              height: cellSize, position: 'relative', cursor: 'pointer',
+              borderRadius: 10, display: 'flex', flexDirection: 'column',
+              alignItems: 'center', justifyContent: 'center', gap: 3,
+              background: isSelected ? T.live : 'transparent',
+              transition: 'background .14s, transform .08s',
+            }}
+            onMouseEnter={e => { if (!isSelected) e.currentTarget.style.background = T.bg2; }}
+            onMouseLeave={e => { if (!isSelected) e.currentTarget.style.background = 'transparent'; }}>
+              <span style={{
+                fontFamily: T.font, fontSize: compact ? 13 : 14,
+                fontWeight: isToday || isSelected ? 700 : (hasEvents ? 500 : 400),
+                color: isSelected ? '#0a1208'
+                  : isToday ? T.live
+                  : hasEvents ? T.text
+                  : T.textDim,
+                lineHeight: 1,
+              }}>{d}</span>
+              {hasEvents && (
+                <div style={{ display: 'flex', gap: 2, height: dotSize + 1, alignItems: 'center' }}>
+                  {[...Array(Math.min(count, 3))].map((_, j) => (
+                    <div key={j} style={{
+                      width: dotSize, height: dotSize, borderRadius: '50%',
+                      background: isSelected ? '#0a1208' : T.live,
+                      opacity: isSelected ? 1 : 0.85,
+                    }}/>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { TopNav, SideNav, MatchCard, MatchCalendar, dateKey, pickShorterLead, pickValidLeads, leadLabel, NOTIFY_LEAD_OPTS, iconBtn, StarToggle, NotifyToggle, useMatchStats, useFullscreen, usePlayerActivity, StatsOverlay, StatsToggle, FullscreenButton, FullscreenClickTrap });
