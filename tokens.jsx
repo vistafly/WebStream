@@ -61,7 +61,7 @@ function LiveDot({ size = 6, label = 'LIVE' }) {
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 6,
-      fontFamily: T.font, fontSize: 10, fontWeight: 600,
+      fontFamily: T.font, fontSize: 10, fontWeight: 600, lineHeight: 1,
       letterSpacing: '0.12em', color: T.live,
     }}>
       <span style={{

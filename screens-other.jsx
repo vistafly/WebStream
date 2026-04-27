@@ -89,7 +89,9 @@ function ScheduleScreen() {
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '380px 1fr', gap: 24, alignItems: 'start' }}>
-            <MatchCalendar matches={items || []} selected={selectedDate} onSelect={setSelectedDate}/>
+            <div style={{ position: 'sticky', top: 0, alignSelf: 'start' }}>
+              <MatchCalendar matches={items || []} selected={selectedDate} onSelect={setSelectedDate}/>
+            </div>
 
             <div>
               <div style={{

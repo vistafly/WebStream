@@ -161,7 +161,25 @@ window.MatchCover = MatchCover;
 function TopNav({ q, setQ }) {
   const store = window.useWSStore();
   const value = q != null ? q : store.get().search;
-  const onChange = setQ || ((v) => { store.setSearch(v); if (v && window.WS_GO) window.WS_GO('search'); });
+  const inputRef = React.useRef(null);
+  const onChange = setQ || ((v) => {
+    store.setSearch(v);
+    if (v && window.WS_GO) {
+      const here = (window.location.hash || '').replace(/^#/, '');
+      if (here !== 'search') window.WS_GO('search');
+    }
+  });
+  // When TopNav remounts on a new screen but a search value is already
+  // present (i.e. the user just typed and we navigated to /search), restore
+  // focus and put the caret at the end so typing can continue seamlessly.
+  React.useEffect(() => {
+    const el = inputRef.current;
+    if (el && value && document.activeElement !== el) {
+      el.focus();
+      const n = el.value.length;
+      try { el.setSelectionRange(n, n); } catch (e) {}
+    }
+  }, []);
   return (
     <div style={{
       height: 56, display: 'flex', alignItems: 'center',
@@ -204,6 +222,7 @@ function TopNav({ q, setQ }) {
         }}>
           <span style={{ color: T.textDim }}>{Icons.search}</span>
           <input
+            ref={inputRef}
             value={value || ''}
             onChange={e => onChange(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter' && window.WS_GO) window.WS_GO('search'); }}
@@ -470,10 +489,13 @@ function MatchCard({ m, compact, onClick, fill }) {
         <div style={{ position: 'absolute', top: 10, left: 10, display: 'flex', gap: 6 }}>
           {m.live === true ? <div style={{
             background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(6px)',
-            padding: '4px 8px', borderRadius: 4,
+            height: 18, padding: '0 8px', borderRadius: 4,
+            display: 'flex', alignItems: 'center',
           }}><LiveDot/></div> : (typeof m.clock === 'string' && m.clock.length > 0 ? <div style={{
-            background: 'rgba(0,0,0,0.55)', padding: '4px 8px', borderRadius: 4,
-            fontFamily: T.mono, fontSize: 10, color: T.textDim,
+            background: 'rgba(0,0,0,0.55)',
+            height: 18, padding: '0 8px', borderRadius: 4,
+            display: 'flex', alignItems: 'center',
+            fontFamily: T.mono, fontSize: 10, color: T.textDim, lineHeight: 1,
           }}>{m.clock}</div> : null)}
         </div>
         {/* Top-right: live → viewers count, non-live → notify-me bell */}
@@ -828,17 +850,23 @@ function StatsOverlay({ stats, open, onClose, compact }) {
 
       {stats.stats && stats.stats.length > 0 && sect('Box score', (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {stats.stats.map((row, i) => (
-            <div key={i} style={{
-              display: 'grid', gridTemplateColumns: '1fr auto 1fr',
-              gap: 10, alignItems: 'center',
-              fontFamily: T.font, fontSize: 12, color: '#fff',
-            }}>
-              <div style={{ textAlign: 'left', fontFamily: T.mono, fontWeight: 600, color: 'rgba(255,255,255,0.95)' }}>{row.home}</div>
-              <div style={{ fontFamily: T.mono, fontSize: 10, color: 'rgba(255,255,255,0.5)', letterSpacing: '0.1em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{row.label}</div>
-              <div style={{ textAlign: 'right', fontFamily: T.mono, fontWeight: 600, color: 'rgba(255,255,255,0.95)' }}>{row.away}</div>
-            </div>
-          ))}
+          {stats.stats.map((row, i) => {
+            const lh = parseFloat(String(row.home).replace(/[^\d.]/g, '')) || 0;
+            const la = parseFloat(String(row.away).replace(/[^\d.]/g, '')) || 0;
+            const homeHi = lh >= la && lh > 0;
+            const awayHi = la > lh;
+            return (
+              <div key={i} style={{
+                display: 'grid', gridTemplateColumns: '1fr auto 1fr',
+                gap: 10, alignItems: 'center',
+                fontFamily: T.font, fontSize: 12, color: '#fff',
+              }}>
+                <div style={{ textAlign: 'left', fontFamily: T.mono, fontWeight: homeHi ? 700 : 600, color: homeHi ? T.live : 'rgba(255,255,255,0.55)' }}>{row.home}</div>
+                <div style={{ fontFamily: T.mono, fontSize: 10, color: 'rgba(255,255,255,0.5)', letterSpacing: '0.1em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{row.label}</div>
+                <div style={{ textAlign: 'right', fontFamily: T.mono, fontWeight: awayHi ? 700 : 600, color: awayHi ? T.live : 'rgba(255,255,255,0.55)' }}>{row.away}</div>
+              </div>
+            );
+          })}
         </div>
       ))}
     </div>

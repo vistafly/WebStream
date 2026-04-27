@@ -10,6 +10,15 @@ function HomeGrid() {
   const filtered = filterMatches.length === 0 && sportFilter !== 'all' ? MATCHES : filterMatches;
   const live = filtered.filter(m => m.live);
   const upcoming = filtered.filter(m => !m.live);
+  const todayKey = window.dateKey(new Date());
+  const upcomingToday = upcoming.filter(m => {
+    const ts = m && m.raw && typeof m.raw.date === 'number' ? m.raw.date : 0;
+    return ts && window.dateKey(new Date(ts)) === todayKey;
+  });
+  const upcomingLater = upcoming.filter(m => {
+    const ts = m && m.raw && typeof m.raw.date === 'number' ? m.raw.date : 0;
+    return !ts || window.dateKey(new Date(ts)) !== todayKey;
+  });
   const hero = live[0] || filtered[0] || { a: 'No matches', b: '', league: sportFilter === 'all' ? 'Streamed.pk · live' : sportFilter, score: '', clock: '', viewers: '', hue: 200, poster: null };
   const tile1 = live[1] || filtered[1];
   const tile2 = live[2] || filtered[2];
@@ -77,10 +86,23 @@ function HomeGrid() {
             {live.slice(0, 8).map(m => <MatchCard key={m.id} m={m}/>)}
           </div>
 
-          <SectionHeader title="Coming Up Today"/>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-            {upcoming.map(m => <MatchCard key={m.id} m={m}/>)}
-          </div>
+          {upcomingToday.length > 0 && (
+            <>
+              <SectionHeader title="Coming Up Today" sub={`${upcomingToday.length} ${upcomingToday.length === 1 ? 'match' : 'matches'}`}/>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 28 }}>
+                {upcomingToday.map(m => <MatchCard key={m.id} m={m}/>)}
+              </div>
+            </>
+          )}
+
+          {upcomingLater.length > 0 && (
+            <>
+              <SectionHeader title="Upcoming" sub={`${upcomingLater.length} ${upcomingLater.length === 1 ? 'match' : 'matches'}`}/>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+                {upcomingLater.map(m => <MatchCard key={m.id} m={m}/>)}
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

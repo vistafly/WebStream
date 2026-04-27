@@ -949,10 +949,10 @@ function RealStatsPanel({ match }) {
         const total = lh + la || 1;
         return (
           <div key={s.label} style={{ marginBottom: 12 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontFamily: T.mono, fontSize: 11, color: T.text, marginBottom: 5 }}>
-              <span style={{ fontWeight: 600 }}>{s.home}</span>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontFamily: T.mono, fontSize: 11, marginBottom: 5 }}>
+              <span style={{ fontWeight: lh >= la && lh > 0 ? 700 : 600, color: lh >= la && lh > 0 ? T.live : T.textDim }}>{s.home}</span>
               <span style={{ color: T.textDim, fontSize: 10, letterSpacing: '0.06em' }}>{s.label}</span>
-              <span style={{ fontWeight: 600 }}>{s.away}</span>
+              <span style={{ fontWeight: la > lh ? 700 : 600, color: la > lh ? T.live : T.textDim }}>{s.away}</span>
             </div>
             <div style={{ display: 'flex', height: 4, gap: 2 }}>
               <div style={{ flex: lh / total, background: T.live, borderRadius: 2, minWidth: lh > 0 ? 2 : 0 }}/>
