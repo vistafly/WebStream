@@ -791,21 +791,15 @@ function StatsOverlay({ stats, open, onClose, compact }) {
   );
   const team = (t, side) => (
     <div style={{
-      display: 'flex', flexDirection: 'column', alignItems: side === 'home' ? 'flex-start' : 'flex-end',
-      flex: 1, minWidth: 0,
+      display: 'flex', flexDirection: 'column', alignItems: 'center',
+      flex: 1, minWidth: 0, gap: 4,
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexDirection: side === 'home' ? 'row' : 'row-reverse' }}>
-        {t.logo && <img src={t.logo} alt="" style={{ width: 26, height: 26, objectFit: 'contain' }}/>}
-        <div style={{
-          fontFamily: T.font, fontSize: 13, fontWeight: 600, color: '#fff',
-          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-          maxWidth: 140,
-        }}>{t.shortName || t.name}</div>
-      </div>
+      {t.logo && <img src={t.logo} alt="" style={{ width: 36, height: 36, objectFit: 'contain' }}/>}
       <div style={{
-        fontFamily: T.mono, fontSize: 26, fontWeight: 700, color: '#fff',
-        marginTop: 4, letterSpacing: '-0.02em',
-      }}>{t.score}</div>
+        fontFamily: T.font, fontSize: 11, fontWeight: 600, color: '#fff',
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        maxWidth: '100%', letterSpacing: '0.02em',
+      }}>{t.shortName || t.name}</div>
     </div>
   );
   return (
@@ -814,13 +808,13 @@ function StatsOverlay({ stats, open, onClose, compact }) {
       top: compact ? 'calc(env(safe-area-inset-top) + 60px)' : 16,
       right: compact ? 12 : 16,
       left: compact ? 12 : 'auto',
-      width: compact ? 'auto' : 360,
+      width: compact ? 'auto' : 230,
       maxHeight: compact ? 'calc(100% - 120px)' : 'calc(100% - 32px)',
       background: 'rgba(8,10,14,0.78)',
       backdropFilter: 'blur(18px) saturate(160%)',
       WebkitBackdropFilter: 'blur(18px) saturate(160%)',
       border: '1px solid rgba(255,255,255,0.12)',
-      borderRadius: 14, padding: 16, color: '#fff',
+      borderRadius: 12, padding: '12px 10px', color: '#fff',
       zIndex: 12, overflow: 'auto',
       boxShadow: '0 16px 48px rgba(0,0,0,0.55)',
       animation: 'ws-stats-in .25s ease-out',
@@ -842,9 +836,12 @@ function StatsOverlay({ stats, open, onClose, compact }) {
         </button>
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         {team(stats.home, 'home')}
-        <div style={{ fontFamily: T.mono, fontSize: 11, color: 'rgba(255,255,255,0.45)' }}>vs</div>
+        <div style={{
+          fontFamily: T.mono, fontSize: 20, fontWeight: 700, color: '#fff',
+          letterSpacing: '-0.02em', whiteSpace: 'nowrap',
+        }}>{stats.home.score}<span style={{ color: 'rgba(255,255,255,0.45)', margin: '0 4px' }}>—</span>{stats.away.score}</div>
         {team(stats.away, 'away')}
       </div>
 
@@ -858,11 +855,11 @@ function StatsOverlay({ stats, open, onClose, compact }) {
             return (
               <div key={i} style={{
                 display: 'grid', gridTemplateColumns: '1fr auto 1fr',
-                gap: 10, alignItems: 'center',
-                fontFamily: T.font, fontSize: 12, color: '#fff',
+                gap: 8, alignItems: 'center',
+                fontFamily: T.font, fontSize: 11, color: '#fff',
               }}>
                 <div style={{ textAlign: 'left', fontFamily: T.mono, fontWeight: homeHi ? 700 : 600, color: homeHi ? T.live : 'rgba(255,255,255,0.55)' }}>{row.home}</div>
-                <div style={{ fontFamily: T.mono, fontSize: 10, color: 'rgba(255,255,255,0.5)', letterSpacing: '0.1em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{row.label}</div>
+                <div style={{ fontFamily: T.mono, fontSize: 9, color: 'rgba(255,255,255,0.5)', letterSpacing: '0.08em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{row.label}</div>
                 <div style={{ textAlign: 'right', fontFamily: T.mono, fontWeight: awayHi ? 700 : 600, color: awayHi ? T.live : 'rgba(255,255,255,0.55)' }}>{row.away}</div>
               </div>
             );
@@ -909,15 +906,37 @@ function usePlayerActivity(ref, idleMs) {
 // iframe) so React-rendered overlays (stats etc.) stay layered on top.
 // Switches to an exit icon when already fullscreen, and auto-fades on
 // inactivity (driven by the `visible` prop) to mimic native player UX.
-function FullscreenButton({ isFullscreen, onRequest, onExit, visible = true, compact }) {
+function FullscreenButton({ isFullscreen, onRequest, onExit, visible = true, compact, invisible }) {
   const handle = isFullscreen ? onExit : onRequest;
+  if (invisible) {
+    // Fully transparent click target — no SVG, no background, no border.
+    // Sole purpose: keep the keyboard/click path to fullscreen alive so
+    // the stats overlay still has a way to be triggered, without any
+    // visible chrome.
+    return (
+      <button
+        onClick={handle}
+        aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+        style={{
+          position: 'absolute',
+          bottom: compact ? 'calc(env(safe-area-inset-bottom) + 56px)' : 56,
+          right: compact ? 12 : 16,
+          zIndex: 11,
+          width: 32, height: 32, padding: 0,
+          background: 'transparent', border: 'none', outline: 'none',
+          cursor: 'pointer', opacity: 0,
+          pointerEvents: 'auto',
+        }}
+      />
+    );
+  }
   return (
     <button onClick={handle} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'} style={{
       position: 'absolute',
-      bottom: compact ? 'calc(env(safe-area-inset-bottom) + 12px)' : 14,
-      right: compact ? 20 : 24,
+      bottom: compact ? 'calc(env(safe-area-inset-bottom) + 56px)' : 56,
+      right: compact ? 12 : 16,
       zIndex: 11,
-      width: 36, height: 36, borderRadius: 8,
+      width: 32, height: 32, borderRadius: 8,
       background: 'rgba(0,0,0,0.6)',
       backdropFilter: 'blur(8px)',
       color: '#fff', border: '1px solid rgba(255,255,255,0.18)',
@@ -956,7 +975,7 @@ function FullscreenClickTrap({ isFullscreen, onRequest, onExit, compact }) {
       style={{
         position: 'absolute',
         bottom: 0, right: 0,
-        width: compact ? 64 : 72, height: compact ? 56 : 60,
+        width: compact ? 44 : 48, height: compact ? 40 : 44,
         zIndex: 10, // above iframe (1) and cover (2), below FullscreenButton (11)
         cursor: 'pointer',
         background: 'transparent',

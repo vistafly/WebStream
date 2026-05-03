@@ -174,7 +174,7 @@ function MobilePlayer({ match, streams, streamsLoading }) {
       </button>
 
       <window.FullscreenClickTrap isFullscreen={isFullscreen} onRequest={requestFullscreen} onExit={exitFullscreen} compact/>
-      <window.FullscreenButton isFullscreen={isFullscreen} onRequest={requestFullscreen} onExit={exitFullscreen} visible={controlsVisible} compact/>
+      <window.FullscreenButton isFullscreen={isFullscreen} onRequest={requestFullscreen} onExit={exitFullscreen} visible={controlsVisible} compact invisible/>
       {isFullscreen && (
         <>
           <window.StatsToggle available={statsAvailable && (m && m.live)} open={statsOpen} onToggle={() => setStatsOpen(o => !o)} compact/>

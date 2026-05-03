@@ -461,7 +461,8 @@ function PlayerFull({ match, streams, streamsLoading }) {
   const store = window.useWSStore();
   const realStreams = Array.isArray(streams) ? streams : [];
   const hasReal = realStreams.length > 0;
-  const initialServer = hasReal ? realStreams[0].source : 'alpha';
+  const streamKey = (s) => s.source + '#' + (s.streamNo != null ? s.streamNo : 0);
+  const initialServer = hasReal ? streamKey(realStreams[0]) : 'alpha';
   const [server, setServer] = React.useState(initialServer);
   const [streamIdx, setStreamIdx] = React.useState(0);
   const [tab, setTab] = React.useState('stats'); // 'stats' | 'events'
@@ -469,6 +470,22 @@ function PlayerFull({ match, streams, streamsLoading }) {
   const [iframeKey, setIframeKey] = React.useState(0);
   const [iframeLoaded, setIframeLoaded] = React.useState(false);
   const [autoSwitched, setAutoSwitched] = React.useState(0);
+  // Streams whose iframe failed to load within the failover window. Cleared
+  // when a stream loads successfully on retry; surfaced in the SourcesPanel
+  // so users see which mirrors are currently broken.
+  const [failedStreams, setFailedStreams] = React.useState(() => new Set());
+  // When the active selection was made — used to decide whether a switch
+  // away from this source counts as an implicit "didn't work" signal.
+  const selectionTsRef = React.useRef(Date.now());
+  // Per-stream "we got onLoad and reset the failure-mark to clean" guard.
+  // Without this, the post-load watchdog re-arms on every render and can
+  // mark a stream that's actually playing.
+  const watchdogArmedRef = React.useRef(null);
+  // Mirror of iframeLoaded for use inside setTimeout closures whose effect
+  // doesn't re-run when iframeLoaded toggles.
+  const iframeLoadedRef = React.useRef(false);
+  React.useEffect(() => { iframeLoadedRef.current = iframeLoaded; }, [iframeLoaded]);
+  const iframeRef = React.useRef(null);
   // Cover fade logic:
   //   - Hold the cover at least 1s after entering the player (deliberate reveal).
   //   - Fade once the iframe has loaded, OR after a 4s safety timeout — some
@@ -486,35 +503,127 @@ function PlayerFull({ match, streams, streamsLoading }) {
     return () => { clearTimeout(tHold); clearTimeout(tFallback); };
   }, [m.id]);
   const showIframe = (iframeLoaded || fallbackElapsed) && holdReleased;
-  React.useEffect(() => { setStreamIdx(0); setServer(initialServer); setAutoSwitched(0); }, [m.id, hasReal]);
+  React.useEffect(() => {
+    setStreamIdx(0); setServer(initialServer); setAutoSwitched(0);
+    setFailedStreams(new Set());
+    selectionTsRef.current = Date.now();
+    watchdogArmedRef.current = null;
+  }, [m.id, hasReal]);
+
+  // Switching sources is a neutral user action — never infer failure from
+  // it. Failure is only ever inferred from the two watchdogs:
+  //   - pre-load (iframe never fires onLoad in 8s)
+  //   - post-load engagement (no user interaction in 25s after onLoad)
+  const selectStream = React.useCallback((nextKey) => {
+    selectionTsRef.current = Date.now();
+    setServer(nextKey);
+  }, []);
+
+  // When the active iframe loads successfully, drop it from the failed set
+  // (it might have been marked failed earlier and the user retried it).
+  React.useEffect(() => {
+    if (!iframeLoaded || !server) return;
+    setFailedStreams(prev => {
+      if (!prev.has(server)) return prev;
+      const next = new Set(prev);
+      next.delete(server);
+      return next;
+    });
+  }, [iframeLoaded, server]);
 
   // Push to "recently watched" once per match.
   React.useEffect(() => { if (m && m.id) store.pushRecent(m); }, [m && m.id]);
 
   const activeStream = hasReal
-    ? (realStreams.find(s => s.source === server) || realStreams[streamIdx] || realStreams[0])
+    ? (realStreams.find(s => streamKey(s) === server) || realStreams[streamIdx] || realStreams[0])
     : null;
   const serverList = hasReal
     ? Array.from(new Set(realStreams.map(s => s.source))).slice(0, 6)
         .map(src => ({ id: src, name: src.charAt(0).toUpperCase() + src.slice(1) }))
     : [];
 
-  // Auto-failover: if iframe doesn't fire onLoad within 8s, advance to next source.
+  // Two-stage failure detection:
+  //   Stage 1 (8s): iframe never fires onLoad. The embed page itself is
+  //                 unreachable — clearly broken. Mark + advance.
+  //   Stage 2 (20s after onLoad): iframe loaded but we have no way to
+  //                 know if HLS playback inside is actually working
+  //                 (cross-origin). Re-arm a watchdog; if the user
+  //                 switches away within selectStream's 35s window the
+  //                 source is marked. We can't auto-detect "Could not
+  //                 play video" because the iframe is opaque, but the
+  //                 selectStream heuristic catches it the moment they
+  //                 manually try a different mirror.
   React.useEffect(() => {
     if (!activeStream) return;
     setIframeLoaded(false);
-    if (!store.get().settings.autoSwitch) return;
+    const failingKey = server;
+    watchdogArmedRef.current = failingKey;
     const t = setTimeout(() => {
-      if (iframeLoaded) return;
-      const sources = Array.from(new Set(realStreams.map(s => s.source)));
-      const idx = sources.indexOf(server);
-      if (idx >= 0 && idx < sources.length - 1 && autoSwitched < sources.length) {
-        setServer(sources[idx + 1]);
+      if (iframeLoadedRef.current) return;
+      setFailedStreams(prev => {
+        if (prev.has(failingKey)) return prev;
+        const next = new Set(prev);
+        next.add(failingKey);
+        return next;
+      });
+      if (!store.get().settings.autoSwitch) return;
+      const keys = realStreams.map(streamKey);
+      const idx = keys.indexOf(failingKey);
+      if (idx >= 0 && idx < keys.length - 1 && autoSwitched < keys.length) {
+        const next = realStreams[idx + 1];
+        const nextLabel = next ? (next.source.charAt(0).toUpperCase() + next.source.slice(1)) + (next.streamNo != null ? ' · #' + next.streamNo : '') : 'next mirror';
+        selectStream(keys[idx + 1]);
         setAutoSwitched(autoSwitched + 1);
+        if (window.WSToast) window.WSToast(`Source didn't load — switched to ${nextLabel}`);
       }
     }, 8000);
     return () => clearTimeout(t);
   }, [activeStream && activeStream.embedUrl]);
+
+  // No Stage-2 post-load watchdog. Cross-origin iframes give us no reliable
+  // way to distinguish a silent viewer from a broken-but-loaded stream —
+  // any non-engagement heuristic produces false positives on real users.
+  // ISSUE flagging is now driven exclusively by the pre-load watchdog
+  // (iframe never fires onLoad in N seconds = definitively broken).
+
+  // postMessage probe — listens for any messages from the streamed.pk iframe.
+  // Cross-origin iframes can voluntarily emit postMessages to their parent,
+  // and some embed players announce playback state, errors, or HLS events
+  // this way. We log everything received to learn whether streamed.pk
+  // sends anything useful, and if so, react to clear failure signals.
+  React.useEffect(() => {
+    if (!activeStream) return;
+    const failingKey = server;
+    const onMsg = (e) => {
+      // Ignore noise from React DevTools, browser extensions, our own code.
+      const d = e && e.data;
+      if (!d) return;
+      const isReactInternal = typeof d === 'object' && (d.source === 'react-devtools-content-script' || d.source === 'react-devtools-bridge');
+      if (isReactInternal) return;
+      // Best-effort filter to messages originating from the streamed.pk
+      // iframe — embedme.top is their CDN host. Also accept anything from
+      // an opaque `null` origin since some embeds use srcdoc.
+      const origin = e.origin || '';
+      const fromEmbed = origin.includes('streamed') || origin.includes('embedme') || origin === 'null' || origin === '';
+      if (!fromEmbed) return;
+      try {
+        // eslint-disable-next-line no-console
+        console.log('[WS player postMessage]', { origin, data: d });
+      } catch (err) {}
+      // Heuristic: if the payload mentions 'error' or 'fail', mark failed.
+      const text = typeof d === 'string' ? d.toLowerCase()
+        : (typeof d === 'object' && d != null) ? JSON.stringify(d).toLowerCase()
+        : '';
+      if (text && /\b(error|failed|cannot|unavailable|hlsnetworkerror|manifestloaderror)\b/.test(text)) {
+        setFailedStreams(prev => {
+          if (prev.has(failingKey)) return prev;
+          const n = new Set(prev); n.add(failingKey); return n;
+        });
+      }
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, [activeStream && activeStream.embedUrl, server]);
 
   // Tab-toggleable stats overlay (only visible while the player is fullscreened).
   const { stats, available: statsAvailable } = window.useMatchStats(m);
@@ -542,6 +651,7 @@ function PlayerFull({ match, streams, streamsLoading }) {
                 permanently so the player area never goes blank. */}
             {activeStream && activeStream.embedUrl && (
               <iframe
+                ref={iframeRef}
                 key={activeStream.embedUrl + ':' + iframeKey}
                 src={activeStream.embedUrl}
                 onLoad={() => setIframeLoaded(true)}
@@ -576,7 +686,47 @@ function PlayerFull({ match, streams, streamsLoading }) {
             {m && !m.live && <NotLiveNotice m={m}/>}
 
             <window.FullscreenClickTrap isFullscreen={isFullscreen} onRequest={requestFullscreen} onExit={exitFullscreen}/>
-            <window.FullscreenButton isFullscreen={isFullscreen} onRequest={requestFullscreen} onExit={exitFullscreen} visible={controlsVisible}/>
+            <window.FullscreenButton isFullscreen={isFullscreen} onRequest={requestFullscreen} onExit={exitFullscreen} visible={controlsVisible} invisible/>
+            {(() => {
+              const keys = realStreams.map(streamKey);
+              const idx = keys.indexOf(server);
+              const hasNext = idx >= 0 && idx < keys.length - 1;
+              if (!hasNext) return null;
+              return (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const nextKey = keys[idx + 1];
+                    const next = realStreams[idx + 1];
+                    const nextLabel = next ? (next.source.charAt(0).toUpperCase() + next.source.slice(1)) + (next.streamNo != null ? ' · #' + next.streamNo : '') : 'next mirror';
+                    setFailedStreams(prev => {
+                      if (prev.has(server)) return prev;
+                      const n = new Set(prev); n.add(server); return n;
+                    });
+                    selectStream(nextKey);
+                    if (window.WSToast) window.WSToast(`Switched to ${nextLabel}`);
+                  }}
+                  title="Stream not working? Switch to next mirror"
+                  style={{
+                    position: 'absolute', top: 16, left: 16, zIndex: 11,
+                    height: 30, padding: '0 12px', borderRadius: 999,
+                    background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(8px)',
+                    color: '#fff', border: '1px solid rgba(255,255,255,0.18)',
+                    fontFamily: T.font, fontSize: 11, fontWeight: 600,
+                    letterSpacing: '0.04em', cursor: 'pointer',
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    opacity: controlsVisible ? 1 : 0,
+                    transition: 'opacity .25s ease',
+                    pointerEvents: controlsVisible ? 'auto' : 'none',
+                  }}
+                >
+                  <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+                    <path d="M2 5.5a3.5 3.5 0 0 1 6-2.5M9 5.5a3.5 3.5 0 0 1-6 2.5M8 1v2.5H5.5M3 10V7.5H5.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                  Next mirror
+                </button>
+              );
+            })()}
             {isFullscreen && (
               <>
                 <window.StatsToggle available={statsAvailable && (m && m.live)} open={statsOpen} onToggle={() => setStatsOpen(o => !o)}/>
@@ -646,7 +796,22 @@ function PlayerFull({ match, streams, streamsLoading }) {
               )}
             </div>
             <div className="ws-scroll" style={{ flex: 1, overflowY: 'auto', padding: 12 }}>
-              <SourcesPanel server={server} setServer={setServer} streams={realStreams}/>
+              <SourcesPanel
+                server={server}
+                setServer={selectStream}
+                streams={realStreams}
+                failed={failedStreams}
+                onRetry={(key) => {
+                  setFailedStreams(prev => {
+                    if (!prev.has(key)) return prev;
+                    const next = new Set(prev);
+                    next.delete(key);
+                    return next;
+                  });
+                  selectionTsRef.current = Date.now();
+                  setIframeKey(k => k + 1);
+                }}
+              />
             </div>
           </div>
         </div>
@@ -761,12 +926,13 @@ function StatsPanel() {
   );
 }
 
-function SourcesPanel({ server, setServer, streams }) {
+function SourcesPanel({ server, setServer, streams, failed, onRetry }) {
   const real = Array.isArray(streams) ? streams : [];
+  const failedSet = failed instanceof Set ? failed : new Set();
   const list = real.length > 0
-    ? real.map((s, i) => ({
-        id: s.source + '-' + (s.streamNo != null ? s.streamNo : i),
-        sourceId: s.source,
+    ? real.map((s) => ({
+        id: s.source + '#' + (s.streamNo != null ? s.streamNo : 0),
+        sourceId: s.source + '#' + (s.streamNo != null ? s.streamNo : 0),
         name: (s.source.charAt(0).toUpperCase() + s.source.slice(1)) + (s.streamNo != null ? ' · #' + s.streamNo : ''),
         sub: (s.hd ? 'HD' : 'SD') + ' · ' + (s.language || 'EN'),
         level: s.hd ? 4 : 3,
@@ -786,21 +952,42 @@ function SourcesPanel({ server, setServer, streams }) {
       </div>
       <div style={{ fontFamily: T.mono, fontSize: 10, color: T.textFaint, letterSpacing: '0.14em', marginBottom: 8 }}>SOURCES · {list.length} ACTIVE</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        {list.map(s => (
-          <div key={s.id} style={{
-            display: 'flex', alignItems: 'center', gap: 10, padding: '10px 10px',
-            background: s.sourceId === server ? T.bg2 : 'transparent',
-            border: `1px solid ${s.sourceId === server ? T.hairlineStrong : 'transparent'}`,
-            borderRadius: 6, cursor: 'pointer',
-          }} onClick={() => setServer(s.sourceId)}>
-            <SignalBars level={s.level}/>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontFamily: T.font, fontSize: 12, fontWeight: 600, color: T.text }}>{s.name}</div>
-              <div style={{ fontFamily: T.mono, fontSize: 9, color: T.textFaint, marginTop: 2 }}>{s.sub}</div>
+        {list.map(s => {
+          const isFailed = failedSet.has(s.sourceId);
+          const isActive = s.sourceId === server;
+          return (
+            <div key={s.id} style={{
+              display: 'flex', alignItems: 'center', gap: 10, padding: '10px 10px',
+              background: isActive ? T.bg2 : 'transparent',
+              border: `1px solid ${isActive ? T.hairlineStrong : 'transparent'}`,
+              borderRadius: 6, cursor: 'pointer',
+              opacity: isFailed && !isActive ? 0.55 : 1,
+            }} onClick={() => {
+              if (isFailed && s.sourceId === server && onRetry) onRetry(s.sourceId);
+              else if (isFailed && onRetry) { onRetry(s.sourceId); setServer(s.sourceId); }
+              else setServer(s.sourceId);
+            }}>
+              <SignalBars level={isFailed ? 1 : s.level}/>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontFamily: T.font, fontSize: 12, fontWeight: 600, color: isFailed ? '#ff7a7a' : T.text }}>{s.name}</span>
+                  {isFailed && (
+                    <span title="Stream failed to load — click to retry" style={{
+                      fontFamily: T.mono, fontSize: 8, fontWeight: 700,
+                      color: '#ff7a7a', border: '1px solid rgba(255,122,122,0.5)',
+                      background: 'rgba(255,122,122,0.1)',
+                      padding: '1px 4px', borderRadius: 3, letterSpacing: '0.08em',
+                    }}>ISSUE</span>
+                  )}
+                </div>
+                <div style={{ fontFamily: T.mono, fontSize: 9, color: isFailed ? 'rgba(255,122,122,0.7)' : T.textFaint, marginTop: 2 }}>
+                  {isFailed ? 'Failed to load · click to retry' : s.sub}
+                </div>
+              </div>
+              {!isFailed && s.latency != null && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.textDim }}>{s.latency}ms</span>}
             </div>
-            {s.latency != null && <span style={{ fontFamily: T.mono, fontSize: 10, color: T.textDim }}>{s.latency}ms</span>}
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
