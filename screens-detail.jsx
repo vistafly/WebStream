@@ -466,6 +466,7 @@ function PlayerFull({ match, streams, streamsLoading }) {
   const [server, setServer] = React.useState(initialServer);
   const [streamIdx, setStreamIdx] = React.useState(0);
   const [tab, setTab] = React.useState('stats'); // 'stats' | 'events'
+  const [railOpen, setRailOpen] = React.useState(true);
   const [showStatsOverlay, setShowStatsOverlay] = React.useState(false);
   const [iframeKey, setIframeKey] = React.useState(0);
   const [iframeLoaded, setIframeLoaded] = React.useState(false);
@@ -634,7 +635,26 @@ function PlayerFull({ match, streams, streamsLoading }) {
   return (
     <div style={{ height: '100%', background: T.bg0, display: 'flex', flexDirection: 'column' }}>
       <TopNav/>
-      <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 340px', minHeight: 0 }}>
+      <div style={{ flex: 1, display: 'grid', gridTemplateColumns: railOpen ? '1fr 340px' : '1fr', minHeight: 0, position: 'relative' }}>
+        {/* Collapse / expand handle for the right rail */}
+        <button
+          onClick={() => setRailOpen(o => !o)}
+          title={railOpen ? 'Hide panel' : 'Show panel'}
+          style={{
+            position: 'absolute', top: '50%', transform: 'translateY(-50%)',
+            right: railOpen ? 340 : 0, zIndex: 20,
+            width: 22, height: 52, padding: 0,
+            borderRadius: '7px 0 0 7px',
+            background: T.bg2, border: `1px solid ${T.hairlineStrong}`, borderRight: 'none',
+            color: T.textDim, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            transition: 'right .22s ease',
+          }}
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{ transform: railOpen ? 'none' : 'rotate(180deg)' }}>
+            <path d="M3.5 1.5L7 5L3.5 8.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </button>
         {/* Left: player */}
         <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, padding: '16px 16px 16px 24px' }}>
           <div ref={playerRef} style={{
@@ -743,6 +763,7 @@ function PlayerFull({ match, streams, streamsLoading }) {
         </div>
 
         {/* Right rail: tabbed */}
+        {railOpen && (
         <div style={{ borderLeft: `1px solid ${T.hairline}`, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           {/* Tab strip */}
           <div style={{ display: 'flex', borderBottom: `1px solid ${T.hairline}`, padding: '0 8px' }}>
@@ -815,6 +836,7 @@ function PlayerFull({ match, streams, streamsLoading }) {
             </div>
           </div>
         </div>
+        )}
       </div>
     </div>
   );
