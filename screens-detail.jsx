@@ -675,7 +675,9 @@ function PlayerFull({ match, streams, streamsLoading }) {
                 key={activeStream.embedUrl + ':' + iframeKey}
                 src={activeStream.embedUrl}
                 onLoad={() => setIframeLoaded(true)}
-                allow="autoplay; picture-in-picture"
+                allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+                allowFullScreen
+                playsInline
                 referrerPolicy="no-referrer"
                 style={{
                   position: 'absolute', inset: 0, width: '100%', height: '100%',

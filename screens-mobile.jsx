@@ -112,35 +112,60 @@ function MobileHome() {
 function MobilePlayer({ match, streams, streamsLoading }) {
   const m = match || (typeof MATCHES !== 'undefined' && MATCHES[0]) || {};
   const realStreams = Array.isArray(streams) ? streams : [];
-  const sources = Array.from(new Set(realStreams.map(s => s.source)));
-  const [activeSource, setActiveSource] = React.useState(sources[0] || null);
+  // Stable per-stream key so we can switch between every mirror, not just the
+  // first of each source (a source often has several numbered mirrors).
+  const streamKey = (s) => s.source + '#' + (s.streamNo != null ? s.streamNo : 0);
+  // Honor an optional preferred source passed from the detail screen's source
+  // list, otherwise start on the first available stream.
+  const initialStream = (m._preferSource && realStreams.find(s => s.source === m._preferSource)) || realStreams[0];
+  const [activeKey, setActiveKey] = React.useState(initialStream ? streamKey(initialStream) : null);
   const [iframeLoaded, setIframeLoaded] = React.useState(false);
   const [holdReleased, setHoldReleased] = React.useState(false);
   const [fallbackElapsed, setFallbackElapsed] = React.useState(false);
+  // Reset the selection when the match (or its stream list) changes.
   React.useEffect(() => {
-    setActiveSource(sources[0] || null);
+    const first = (m._preferSource && realStreams.find(s => s.source === m._preferSource)) || realStreams[0];
+    setActiveKey(first ? streamKey(first) : null);
+  }, [m.id, realStreams.length]);
+  // Re-run the cover hold/fade timers whenever the active stream changes —
+  // including manual mirror switches — so the loading cover reappears while
+  // the newly selected embed loads instead of showing the previous frame.
+  React.useEffect(() => {
     setIframeLoaded(false);
     setHoldReleased(false);
     setFallbackElapsed(false);
     const tHold = setTimeout(() => setHoldReleased(true), 1000);
     const tFallback = setTimeout(() => setFallbackElapsed(true), 4000);
     return () => { clearTimeout(tHold); clearTimeout(tFallback); };
-  }, [m.id, sources.length]);
-  const activeStream = realStreams.find(s => s.source === activeSource) || realStreams[0];
+  }, [activeKey]);
+  const activeStream = realStreams.find(s => streamKey(s) === activeKey) || realStreams[0];
   const showIframe = (iframeLoaded || fallbackElapsed) && holdReleased;
   const { stats, available: statsAvailable } = window.useMatchStats(m);
   const [statsOpen, setStatsOpen] = React.useState(false);
   const playerRef = React.useRef(null);
   const { isFullscreen, request: requestFullscreen, exit: exitFullscreen } = window.useFullscreen(playerRef);
   const controlsVisible = window.usePlayerActivity(playerRef, 3000);
+
+  // iOS Safari can't run the third-party embed's player: it relies on classic
+  // Media Source Extensions (absent on iPhone), so every stream dies with
+  // html5_video:4. Detect iOS so we can show an honest notice instead of a
+  // silent black screen. (iPadOS reports as "MacIntel" but exposes touch.)
+  const isIOS = /iP(hone|od|ad)/.test(navigator.platform)
+    || /iPhone|iPad|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1);
+  const [noticeDismissed, setNoticeDismissed] = React.useState(false);
+
   return (
     <div ref={playerRef} style={{ width: '100%', height: '100%', background: '#000', position: 'relative', overflow: 'hidden' }}>
       <div style={{ position: 'absolute', inset: 0 }}>
         {activeStream && activeStream.embedUrl && (
           <iframe
+            key={activeKey}
             src={activeStream.embedUrl}
             onLoad={() => setIframeLoaded(true)}
-            allow="autoplay; picture-in-picture"
+            allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+            allowFullScreen
+            playsInline
             referrerPolicy="no-referrer"
             style={{
               position: 'absolute', inset: 0, width: '100%', height: '100%',
@@ -173,6 +198,35 @@ function MobilePlayer({ match, streams, streamsLoading }) {
         <svg width="16" height="16" viewBox="0 0 18 18"><path d="M11 3L4 9L11 15" stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round"/></svg>
       </button>
 
+      {/* iOS limitation notice — the embed provider's player can't run on
+          iPhone/iPad Safari, so streams never play here. Tell the user plainly
+          rather than leaving them on a black screen. Dismissible so they can
+          still poke at the player if they want. */}
+      {isIOS && m && m.live && !noticeDismissed && (
+        <div style={{
+          position: 'absolute', top: 'calc(env(safe-area-inset-top) + 60px)', left: 16, right: 16, zIndex: 13,
+          background: 'rgba(12,13,16,0.92)', border: `1px solid ${T.hairlineStrong}`, borderRadius: 12,
+          padding: '14px 16px', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+            <span style={{ fontSize: 18, lineHeight: '20px' }}>⚠️</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontFamily: T.font, fontSize: 14, fontWeight: 700, color: T.text, marginBottom: 4 }}>
+                Streams don’t play on iPhone
+              </div>
+              <div style={{ fontFamily: T.font, fontSize: 12.5, lineHeight: 1.5, color: T.textDim }}>
+                The stream provider’s player isn’t supported by iOS Safari. Open WebStreamer on a desktop or laptop browser to watch.
+              </div>
+            </div>
+            <button onClick={() => setNoticeDismissed(true)} aria-label="Dismiss" style={{
+              flex: '0 0 auto', width: 26, height: 26, borderRadius: '50%', border: 'none',
+              background: 'rgba(255,255,255,0.1)', color: T.text, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, lineHeight: 1,
+            }}>×</button>
+          </div>
+        </div>
+      )}
+
       <window.FullscreenClickTrap isFullscreen={isFullscreen} onRequest={requestFullscreen} onExit={exitFullscreen} compact/>
       <window.FullscreenButton isFullscreen={isFullscreen} onRequest={requestFullscreen} onExit={exitFullscreen} visible={controlsVisible} compact invisible/>
       {isFullscreen && (
@@ -180,6 +234,42 @@ function MobilePlayer({ match, streams, streamsLoading }) {
           <window.StatsToggle available={statsAvailable && (m && m.live)} open={statsOpen} onToggle={() => setStatsOpen(o => !o)} compact/>
           <window.StatsOverlay stats={stats} open={statsOpen} onClose={() => setStatsOpen(false)} compact/>
         </>
+      )}
+
+      {/* Mirror switcher — lets mobile users move off the first stream when a
+          source won't play (e.g. an iOS-incompatible embed). Visible while the
+          controls are up or the cover is still showing; sits above the cover so
+          it stays tappable during loading. */}
+      {realStreams.length > 1 && (controlsVisible || !showIframe) && (
+        <div className="ws-scroll" style={{
+          position: 'absolute', left: 0, right: 0,
+          bottom: 'calc(env(safe-area-inset-bottom) + 14px)',
+          zIndex: 12, display: 'flex', gap: 8, overflowX: 'auto',
+          padding: '0 12px', WebkitOverflowScrolling: 'touch',
+        }}>
+          {realStreams.map((s) => {
+            const k = streamKey(s);
+            const active = k === activeKey;
+            const sameSource = realStreams.filter(x => x.source === s.source).length;
+            const label = s.source.charAt(0).toUpperCase() + s.source.slice(1)
+              + (sameSource > 1 && s.streamNo != null ? ' ' + s.streamNo : '');
+            return (
+              <button key={k} onClick={() => setActiveKey(k)} style={{
+                flex: '0 0 auto', height: 34, padding: '0 14px', borderRadius: 17,
+                border: active ? 'none' : '1px solid rgba(255,255,255,0.28)',
+                background: active ? T.live : 'rgba(0,0,0,0.6)',
+                color: active ? '#0a1208' : '#fff',
+                fontFamily: T.font, fontSize: 12, fontWeight: 600,
+                display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+                backdropFilter: 'blur(6px)', WebkitBackdropFilter: 'blur(6px)',
+                whiteSpace: 'nowrap',
+              }}>
+                {label}
+                {s.hd && <span style={{ fontFamily: T.mono, fontSize: 9, opacity: 0.85 }}>HD</span>}
+              </button>
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -245,22 +335,27 @@ function MobileMatchDetail({ match }) {
               </div>
             )}
             {(m.rawSources || []).map((s, i) => (
-              <div key={s.source + s.id} style={{
-                display: 'flex', alignItems: 'center', gap: 10, padding: '10px 4px',
-                borderTop: `1px solid ${T.hairline}`,
-              }}>
+              <button key={s.source + s.id}
+                onClick={() => window.WS_GO && window.WS_GO('player', { ...m, _preferSource: s.source })}
+                style={{
+                  width: '100%', textAlign: 'left', background: 'transparent',
+                  display: 'flex', alignItems: 'center', gap: 10, padding: '10px 4px',
+                  borderTop: `1px solid ${T.hairline}`, borderLeft: 'none',
+                  borderRight: 'none', borderBottom: 'none', cursor: 'pointer',
+                }}>
                 <div style={{
                   width: 14, height: 14, borderRadius: '50%',
                   border: `1.5px solid ${i === 0 ? T.live : T.hairlineStrong}`,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto',
                 }}>
                   {i === 0 && <div style={{ width: 6, height: 6, borderRadius: '50%', background: T.live }}/>}
                 </div>
-                <div style={{ flex: 1 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontFamily: T.font, fontSize: 13, fontWeight: 600, color: T.text, textTransform: 'capitalize' }}>{s.source}</div>
-                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.textDim, marginTop: 2 }}>{s.id}</div>
+                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.textDim, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.id}</div>
                 </div>
-              </div>
+                <svg width="14" height="14" viewBox="0 0 18 18" style={{ flex: '0 0 auto', opacity: 0.5 }}><path d="M7 3l6 6-6 6" stroke={T.textDim} strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
+              </button>
             ))}
           </div>
 
